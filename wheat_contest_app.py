@@ -560,11 +560,11 @@ def main():
         st.divider()
 
         # FIX 8: Contact footer in sidebar
-        st.markdown("**📬 Need Help?**")
-        st.markdown(
-            f"Contact the Extension team:\n\n"
-            f"[✉️ {'Dr. Chad Lee'}](mailto:{CONTACT_EMAIL})"
-        )
+        #st.markdown("**📬 Need Help?**")
+        #st.markdown(
+        #    f"Contact the Extension team:\n\n"
+        #    f"[✉️ {'Dr. Chad Lee'}](mailto:{CONTACT_EMAIL})"
+        #)
 
     # ════════════════════════════════════════════════════
     # SECTION 1 — PRODUCER / AGENT
@@ -877,7 +877,7 @@ def main():
 
     submit_clicked = st.button("💾  Save Entry & Send to State Office",
                                disabled=not form_ready, type="primary",
-                               use_container_width=True)
+                               use_container_width=False, width = 200)
 
     # ════════════════════════════════════════════════════
     # ON SUBMIT
@@ -1035,7 +1035,7 @@ def main():
     st.markdown(f"""
     <div class="contact-footer">
         <b>Questions or issues with this form?</b><br>
-        Contact the UK Extension team:
+        Contact Dr. Chad Lee, Extension Professor, UK:
         <a href="mailto:{CONTACT_EMAIL}">✉️ {CONTACT_EMAIL}</a>
         &nbsp;&nbsp;|&nbsp;&nbsp;
         <span style="color:#888;font-size:0.82rem">
