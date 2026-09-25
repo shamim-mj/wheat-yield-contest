@@ -59,7 +59,15 @@ COUNTY_AREA = {
 HEADER_FILL = "2E4057"
 
 # ─────────────────────────────────────────────────────────
-# GOOGLE DRIVE  — service account upload
+# GOOGLE SHEETS  — service accounts write freely, no quota issues
+# Much more reliable than Drive file upload for service accounts.
+# Each submission appends a row. Dr. Lee gets a shared Sheet link.
+#
+# Streamlit secrets needed:
+#   [gdrive]
+#   sheet_id     = "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"  ← from Sheet URL
+#   client_email = "wheat-contest-uploader@your-project.iam.gserviceaccount.com"
+#   private_key  = "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
 # ─────────────────────────────────────────────────────────
 
 def _gdrive_secrets() -> dict:
@@ -69,14 +77,14 @@ def _gdrive_secrets() -> dict:
         return {}
 
 
-def _get_gdrive_token(client_email: str, private_key: str) -> str | None:
-    """Exchange service account JWT for Google access token."""
+def _get_sheets_token(client_email: str, private_key: str) -> str | None:
+    """Get Google access token scoped for Sheets."""
     try:
         now = int(time.time())
         header  = {"alg": "RS256", "typ": "JWT"}
         payload = {
             "iss":   client_email,
-            "scope": "https://www.googleapis.com/auth/drive.file",
+            "scope": "https://www.googleapis.com/auth/spreadsheets",
             "aud":   "https://oauth2.googleapis.com/token",
             "iat":   now,
             "exp":   now + 3600,
@@ -85,25 +93,21 @@ def _get_gdrive_token(client_email: str, private_key: str) -> str | None:
         def b64(data: bytes) -> str:
             return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
-        h = b64(json.dumps(header).encode())
-        p = b64(json.dumps(payload).encode())
+        h   = b64(json.dumps(header).encode())
+        p   = b64(json.dumps(payload).encode())
         msg = f"{h}.{p}".encode()
 
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
-
         key_str = private_key.replace("\\n", "\n")
         pk      = serialization.load_pem_private_key(key_str.encode(), password=None)
         sig     = pk.sign(msg, asym_padding.PKCS1v15(), hashes.SHA256())
-
-        jwt = f"{h}.{p}.{b64(sig)}"
+        jwt     = f"{h}.{p}.{b64(sig)}"
 
         resp = requests.post(
             "https://oauth2.googleapis.com/token",
-            data={
-                "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-                "assertion":  jwt,
-            },
+            data={"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                  "assertion": jwt},
             timeout=15,
         )
         data = resp.json()
@@ -116,102 +120,122 @@ def _get_gdrive_token(client_email: str, private_key: str) -> str | None:
         return None
 
 
-def upload_excel_to_gdrive(filepath: str) -> str | None:
+def append_entry_to_sheet(data: dict, entry_id: int) -> str | None:
     """
-    Upload Excel to owner's shared Google Drive folder.
-
-    KEY FIX: Service accounts have NO storage quota of their own.
-    Files must be created with parents=[folder_id] so they live in
-    the owner's Drive (inside the shared folder), not the service
-    account's storage. supportsAllDrives=true allows writing to
-    folders shared with the service account.
+    Append one row to the Google Sheet.
+    Service accounts have full Sheets write access — no quota issues.
+    Returns the Sheet URL or None on failure.
     """
     cfg          = _gdrive_secrets()
     client_email = cfg.get("client_email", "")
     private_key  = cfg.get("private_key", "")
-    folder_id    = cfg.get("folder_id", "")
+    sheet_id     = cfg.get("sheet_id", "")
 
-    if not all([client_email, private_key, folder_id]):
-        st.session_state["_gd_error"] = (
-            "Missing gdrive secrets: need client_email, private_key, folder_id")
+    if not all([client_email, private_key, sheet_id]):
+        st.session_state["_gd_error"] = "Missing secrets: need client_email, private_key, sheet_id"
         return None
 
-    token = _get_gdrive_token(client_email, private_key)
+    token = _get_sheets_token(client_email, private_key)
     if not token:
         return None
 
     try:
-        with open(filepath, "rb") as f:
-            file_bytes = f.read()
+        area = COUNTY_AREA.get(data.get("County", ""), 4)
+        r    = data.get("_moisture_list", [])
+        row  = [
+            entry_id,
+            data.get("Submission_Date", ""),
+            data.get("County", ""),
+            area,
+            data.get("Producer_Name", ""),
+            data.get("Producer_Address", ""),
+            data.get("Producer_Town", ""),
+            data.get("Producer_Zip", ""),
+            data.get("Producer_Phone", ""),
+            data.get("Producer_Mobile", ""),
+            data.get("Profession", ""),
+            data.get("Harvest_Date", ""),
+            data.get("Supervisor_Name", ""),
+            data.get("Supervisor_Signature_Date", ""),
+            data.get("Division", ""),
+            data.get("Previous_Crop", ""),
+            data.get("Planting_Date", ""),
+            data.get("Wheat_Variety", ""),
+            data.get("Row_Width_inches", ""),
+            data.get("Seeding_Rate", ""),
+            data.get("Fall_N_lbA", ""),
+            data.get("Fall_P2O5_lbA", ""),
+            data.get("Fall_K2O_lbA", ""),
+            data.get("Fall_Other_Fertilizer", ""),
+            data.get("Winter_Spring_N1_Date", ""),
+            data.get("Winter_Spring_N1_lbA", ""),
+            data.get("Winter_Spring_N2_Date", ""),
+            data.get("Winter_Spring_N2_lbA", ""),
+            data.get("Manure_Used", ""),
+            data.get("Manure_Type", ""),
+            data.get("Manure_TonsA", ""),
+            data.get("Manure_Date", ""),
+            data.get("Growth_Regulator", ""),
+            data.get("Fall_Pest_Products", ""),
+            data.get("Spring_Pest_Products", ""),
+            data.get("Heading_Flowering_Pest", ""),
+            data.get("Biologicals_Other", ""),
+            data.get("Tillage_Used", ""),
+            data.get("Harvest_Length_ft", ""),
+            data.get("Harvest_Width_ft", ""),
+            data.get("Harvest_Area_ft2", ""),
+            data.get("Harvest_Acres", ""),
+            r[0] if len(r) > 0 else "",
+            r[1] if len(r) > 1 else "",
+            r[2] if len(r) > 2 else "",
+            data.get("Grain_Moisture_Avg", ""),
+            data.get("Test_Weight_lbbu", ""),
+            data.get("Grain_Weight_lbs", ""),
+            data.get("Official_Yield_BuAcre", ""),
+            data.get("Agent_Notes", ""),
+        ]
 
-        mime    = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        headers = {"Authorization": f"Bearer {token}"}
+        # First entry — write header row first
+        if entry_id == 1:
+            header_row = [
+                "Entry ID","Submission Date","County","Area",
+                "Producer Name","Address","Town","Zip","Phone","Mobile","Profession",
+                "Harvest Date","Supervisor","Supervisor Sign Date",
+                "Division","Previous Crop","Planting Date","Wheat Variety",
+                "Row Width (in)","Seeding Rate",
+                "Fall N","Fall P2O5","Fall K2O","Fall Other",
+                "Spring N1 Date","Spring N1 lb/A","Spring N2 Date","Spring N2 lb/A",
+                "Manure","Manure Type","Manure T/A","Manure Date",
+                "Growth Reg","Fall Pest","Spring Pest","Head/Flower Pest",
+                "Biologicals","Tillage",
+                "Length ft","Width ft","Area ft2","Acres",
+                "Moisture 1","Moisture 2","Moisture 3","Moisture Avg",
+                "Test Wt","Grain Wt lbs","Official Yield Bu/A","Agent Notes",
+            ]
+            requests.post(
+                f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}"
+                f"/values/Sheet1!A1:append",
+                headers={"Authorization": f"Bearer {token}",
+                         "Content-Type": "application/json"},
+                params={"valueInputOption": "RAW"},
+                json={"values": [header_row]},
+                timeout=15,
+            )
 
-        # ── Check if file already exists in the folder ──────────────
-        search = requests.get(
-            "https://www.googleapis.com/drive/v3/files",
-            headers=headers,
-            params={
-                "q":     (f"name='{EXCEL_FILENAME}' and "
-                          f"'{folder_id}' in parents and trashed=false"),
-                "fields":                    "files(id)",
-                "supportsAllDrives":         "true",
-                "includeItemsFromAllDrives": "true",
-            },
-            timeout=10,
+        # Append the data row
+        resp = requests.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}"
+            f"/values/Sheet1!A1:append",
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json"},
+            params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
+            json={"values": [row]},
+            timeout=15,
         )
-        files       = search.json().get("files", [])
-        existing_id = files[0]["id"] if files else None
 
-        if existing_id:
-            # ── UPDATE existing file (PATCH content only) ───────────
-            resp = requests.patch(
-                f"https://www.googleapis.com/upload/drive/v3/files/{existing_id}",
-                headers={**headers, "Content-Type": mime},
-                params={
-                    "uploadType":        "media",
-                    "supportsAllDrives": "true",
-                },
-                data=file_bytes,
-                timeout=30,
-            )
-        else:
-            # ── CREATE new file inside owner's shared folder ─────────
-            # parents=[folder_id] → file lives in YOUR Drive, not service account's
-            # supportsAllDrives=true → allows upload to shared folder
-            boundary = "====wheat_contest===="
-            metadata = json.dumps({
-                "name":    EXCEL_FILENAME,
-                "parents": [folder_id],
-            })
-            body = (
-                f"--{boundary}\r\n"
-                f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
-                f"{metadata}\r\n"
-                f"--{boundary}\r\n"
-                f"Content-Type: {mime}\r\n\r\n"
-            ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--".encode("utf-8")
-
-            resp = requests.post(
-                "https://www.googleapis.com/upload/drive/v3/files",
-                headers={
-                    **headers,
-                    "Content-Type": f"multipart/related; boundary={boundary}",
-                },
-                params={
-                    "uploadType":        "multipart",
-                    "fields":            "id,webViewLink",
-                    "supportsAllDrives": "true",
-                },
-                data=body,
-                timeout=30,
-            )
-
-        if resp.status_code in (200, 201):
-            file_id = resp.json().get("id", existing_id)
-            return f"https://drive.google.com/file/d/{file_id}/view"
-
-        st.session_state["_gd_error"] = f"HTTP {resp.status_code}: {resp.text[:400]}"
+        if resp.status_code == 200:
+            return f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+        st.session_state["_gd_error"] = f"Sheets HTTP {resp.status_code}: {resp.text[:300]}"
         return None
 
     except Exception as e:
@@ -509,10 +533,11 @@ def main():
     with st.sidebar:
         st.header("Settings")
         cfg = _gdrive_secrets()
-        if all([cfg.get("client_email"), cfg.get("private_key"), cfg.get("folder_id")]):
-            st.success("☁️ Google Drive: configured")
+        if all([cfg.get("client_email"), cfg.get("private_key"), cfg.get("sheet_id")]):
+            st.success("📊 Google Sheets: configured")
         else:
-            st.warning("☁️ Google Drive: secrets missing")
+            st.warning("📊 Google Sheets: secrets missing")
+            st.caption("Need: client_email, private_key, sheet_id")
         st.divider()
         st.markdown("**Contest Rules**")
         st.info("- Min. **1.5 acres** harvested\n- Deadline: **July 31**\n"
@@ -798,15 +823,16 @@ def main():
             entry_id = build_excel_with_entry(data, EXCEL_FILE)
             area     = COUNTY_AREA.get(data["County"], 4)
 
-            # 1. Upload to Google Drive
+            # 1. Append row to Google Sheet
             st.session_state["_gd_error"] = None
-            gdrive_url = upload_excel_to_gdrive(EXCEL_FILE)
+            data["Submission_Date"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            sheet_url = append_entry_to_sheet(data, entry_id)
 
             # 2. Queue FormSubmit email
             subject = (f"KY Wheat Contest Entry #{entry_id} — "
                        f"{data['County']} County — {data['Producer_Name']}")
             st.session_state["_pending_formsubmit"] = build_formsubmit_html(
-                data, entry_id, subject, gdrive_url=gdrive_url or "")
+                data, entry_id, subject, gdrive_url=sheet_url or "")
 
             # 3. Success banner
             st.success(f"✅ Entry #{entry_id} saved!")
@@ -824,10 +850,10 @@ def main():
             with col1:
                 st.success("📊 Excel saved")
             with col2:
-                if gdrive_url:
-                    st.success(f"[☁️ View on Google Drive]({gdrive_url})")
+                if sheet_url:
+                    st.success(f"[📊 View Google Sheet]({sheet_url})")
                 else:
-                    st.warning("☁️ Google Drive failed")
+                    st.warning("📊 Google Sheets failed")
                     gd_err = st.session_state.get("_gd_error","")
                     if gd_err:
                         with st.expander("Show error detail"):
