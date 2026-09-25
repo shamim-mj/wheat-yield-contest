@@ -516,7 +516,7 @@ def main():
     with p2:
         st.text_input("Producer Email *", key="producer_email",
                       placeholder="grower@email.com")
-        st.text_input("Phone * (required)", key="producer_phone",
+        st.text_input("Phone *", key="producer_phone",
                       placeholder="270-555-1234")
         st.text_input("Mobile", key="producer_mobile")
     with p3:
@@ -734,7 +734,7 @@ def main():
         if scale_photo:
             st.image(scale_photo,
                      caption=f"✅ {scale_photo.name}  ({scale_photo.size/1024:.0f} KB)",
-                     use_column_width=True)
+                     use_container_width=True)
             st.success("Photo will be saved with this entry.")
         else:
             st.markdown("""
