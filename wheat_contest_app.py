@@ -1,13 +1,6 @@
 """
 Kentucky Wheat Yield Contest - Digital Entry Form
 University of Kentucky Cooperative Extension
-
-Storage  : Google Drive (service account — agents need nothing)
-Email    : FormSubmit.co (zero auth, zero password)
-
-FIX: Service accounts have no storage quota.
-     Files must be uploaded to the OWNER's shared folder
-     using parents=[folder_id] + supportsAllDrives=true.
 """
 
 import streamlit as st
@@ -21,10 +14,12 @@ from pathlib import Path
 # ═════════════════════════════════════════════════════════
 #  OWNER CONFIG
 # ═════════════════════════════════════════════════════════
-FORMSUBMIT_EMAIL = "shamim.one@outlook.com"
-CC_EMAIL         = "chad.lee@uky.edu"
-EXCEL_FILENAME   = "wheat_contest_entries.xlsx"
-EXCEL_FILE       = f"/tmp/{EXCEL_FILENAME}"
+FORMSUBMIT_EMAIL  = "shamim.one@outlook.com"
+CC_EMAIL          = "mshamim11@uky.edu"
+CONTACT_EMAIL     = "chad.lee@uky.edu"
+EXCEL_FILENAME    = "wheat_contest_entries.xlsx"
+EXCEL_FILE        = f"/tmp/{EXCEL_FILENAME}"
+CURRENT_YEAR      = datetime.date.today().year
 # ═════════════════════════════════════════════════════════
 
 KY_COUNTIES = sorted([
@@ -58,16 +53,38 @@ COUNTY_AREA = {
 }
 HEADER_FILL = "2E4057"
 
+COLUMNS = [
+    "Entry_ID","Submission_Date","County","Area",
+    "Producer_Name","Producer_Email","Producer_Phone","Producer_Mobile",
+    "Producer_Address","Producer_Town","Producer_Zip","Profession",
+    "Harvest_Date","Supervisor_Name","Supervisor_Phone","Supervisor_Signature_Date",
+    "Division","Previous_Crop","Planting_Date","Wheat_Variety",
+    "Row_Width_inches","Seeding_Rate",
+    "Fall_N_lbA","Fall_P2O5_lbA","Fall_K2O_lbA","Fall_Other_Fertilizer",
+    "Winter_Spring_N1_Date","Winter_Spring_N1_lbA",
+    "Winter_Spring_N2_Date","Winter_Spring_N2_lbA",
+    "Manure_Used","Manure_Type","Manure_TonsA","Manure_Date",
+    "Growth_Regulator","Fall_Pest_Products","Spring_Pest_Products",
+    "Heading_Flowering_Pest","Biologicals_Other","Tillage_Used",
+    "Harvest_Length_ft","Harvest_Width_ft","Harvest_Area_ft2","Harvest_Acres",
+    "Grain_Moisture_1","Grain_Moisture_2","Grain_Moisture_3","Grain_Moisture_Avg",
+    "Test_Weight_lbbu","Grain_Weight_lbs","Official_Yield_BuAcre","Agent_Notes",
+    "Scale_Ticket_Photo",
+]
+
+SECTION_SPANS = [
+    ("Producer / Agent Info",  1, 16, "1F4E79"),
+    ("Agronomic Data",        17, 22, "375623"),
+    ("Fertilizer",            23, 34, "7B3F00"),
+    ("Pest Management",       35, 40, "6B2737"),
+    ("Harvest Area",          41, 44, "4A235A"),
+    ("Grain Characteristics", 45, 49, "7E5109"),
+    ("Yield Calculation",     50, 51, "1A5276"),
+    ("Notes & Photo",         52, 53, "555555"),
+]
+
 # ─────────────────────────────────────────────────────────
-# GOOGLE SHEETS  — service accounts write freely, no quota issues
-# Much more reliable than Drive file upload for service accounts.
-# Each submission appends a row. Dr. Lee gets a shared Sheet link.
-#
-# Streamlit secrets needed:
-#   [gdrive]
-#   sheet_id     = "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"  ← from Sheet URL
-#   client_email = "wheat-contest-uploader@your-project.iam.gserviceaccount.com"
-#   private_key  = "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
+# GOOGLE SHEETS
 # ─────────────────────────────────────────────────────────
 
 def _gdrive_secrets() -> dict:
@@ -76,9 +93,7 @@ def _gdrive_secrets() -> dict:
     except Exception:
         return {}
 
-
 def _get_sheets_token(client_email: str, private_key: str) -> str | None:
-    """Get Google access token scoped for Sheets."""
     try:
         now = int(time.time())
         header  = {"alg": "RS256", "typ": "JWT"}
@@ -86,30 +101,23 @@ def _get_sheets_token(client_email: str, private_key: str) -> str | None:
             "iss":   client_email,
             "scope": "https://www.googleapis.com/auth/spreadsheets",
             "aud":   "https://oauth2.googleapis.com/token",
-            "iat":   now,
-            "exp":   now + 3600,
+            "iat":   now, "exp": now + 3600,
         }
-
         def b64(data: bytes) -> str:
             return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-        h   = b64(json.dumps(header).encode())
-        p   = b64(json.dumps(payload).encode())
+        h = b64(json.dumps(header).encode())
+        p = b64(json.dumps(payload).encode())
         msg = f"{h}.{p}".encode()
-
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
         key_str = private_key.replace("\\n", "\n")
-        pk      = serialization.load_pem_private_key(key_str.encode(), password=None)
-        sig     = pk.sign(msg, asym_padding.PKCS1v15(), hashes.SHA256())
-        jwt     = f"{h}.{p}.{b64(sig)}"
-
+        pk  = serialization.load_pem_private_key(key_str.encode(), password=None)
+        sig = pk.sign(msg, asym_padding.PKCS1v15(), hashes.SHA256())
+        jwt = f"{h}.{p}.{b64(sig)}"
         resp = requests.post(
             "https://oauth2.googleapis.com/token",
             data={"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-                  "assertion": jwt},
-            timeout=15,
-        )
+                  "assertion": jwt}, timeout=15)
         data = resp.json()
         if "access_token" in data:
             return data["access_token"]
@@ -119,88 +127,57 @@ def _get_sheets_token(client_email: str, private_key: str) -> str | None:
         st.session_state["_gd_error"] = f"JWT error: {e}"
         return None
 
-
-def append_entry_to_sheet(data: dict, entry_id: int) -> str | None:
-    """
-    Append one row to the Google Sheet.
-    Service accounts have full Sheets write access — no quota issues.
-    Returns the Sheet URL or None on failure.
-    """
+def append_entry_to_sheet(data: dict, entry_id: int) -> bool:
+    """Append one row to Google Sheet. Returns True on success."""
     cfg          = _gdrive_secrets()
     client_email = cfg.get("client_email", "")
     private_key  = cfg.get("private_key", "")
     sheet_id     = cfg.get("sheet_id", "")
-
     if not all([client_email, private_key, sheet_id]):
-        st.session_state["_gd_error"] = "Missing secrets: need client_email, private_key, sheet_id"
-        return None
-
+        st.session_state["_gd_error"] = "Missing secrets: client_email / private_key / sheet_id"
+        return False
     token = _get_sheets_token(client_email, private_key)
     if not token:
-        return None
-
+        return False
     try:
-        area = COUNTY_AREA.get(data.get("County", ""), 4)
-        r    = data.get("_moisture_list", [])
-        row  = [
-            entry_id,
-            data.get("Submission_Date", ""),
-            data.get("County", ""),
-            area,
-            data.get("Producer_Name", ""),
-            data.get("Producer_Address", ""),
-            data.get("Producer_Town", ""),
-            data.get("Producer_Zip", ""),
-            data.get("Producer_Phone", ""),
-            data.get("Producer_Mobile", ""),
-            data.get("Profession", ""),
-            data.get("Harvest_Date", ""),
-            data.get("Supervisor_Name", ""),
-            data.get("Supervisor_Signature_Date", ""),
-            data.get("Division", ""),
-            data.get("Previous_Crop", ""),
-            data.get("Planting_Date", ""),
-            data.get("Wheat_Variety", ""),
-            data.get("Row_Width_inches", ""),
-            data.get("Seeding_Rate", ""),
-            data.get("Fall_N_lbA", ""),
-            data.get("Fall_P2O5_lbA", ""),
-            data.get("Fall_K2O_lbA", ""),
-            data.get("Fall_Other_Fertilizer", ""),
-            data.get("Winter_Spring_N1_Date", ""),
-            data.get("Winter_Spring_N1_lbA", ""),
-            data.get("Winter_Spring_N2_Date", ""),
-            data.get("Winter_Spring_N2_lbA", ""),
-            data.get("Manure_Used", ""),
-            data.get("Manure_Type", ""),
-            data.get("Manure_TonsA", ""),
-            data.get("Manure_Date", ""),
-            data.get("Growth_Regulator", ""),
-            data.get("Fall_Pest_Products", ""),
-            data.get("Spring_Pest_Products", ""),
-            data.get("Heading_Flowering_Pest", ""),
-            data.get("Biologicals_Other", ""),
-            data.get("Tillage_Used", ""),
-            data.get("Harvest_Length_ft", ""),
-            data.get("Harvest_Width_ft", ""),
-            data.get("Harvest_Area_ft2", ""),
-            data.get("Harvest_Acres", ""),
-            r[0] if len(r) > 0 else "",
-            r[1] if len(r) > 1 else "",
-            r[2] if len(r) > 2 else "",
-            data.get("Grain_Moisture_Avg", ""),
-            data.get("Test_Weight_lbbu", ""),
-            data.get("Grain_Weight_lbs", ""),
-            data.get("Official_Yield_BuAcre", ""),
-            data.get("Agent_Notes", ""),
+        r = data.get("_moisture_list", [])
+        row = [
+            entry_id, data.get("Submission_Date",""), data.get("County",""),
+            COUNTY_AREA.get(data.get("County",""), 4),
+            data.get("Producer_Name",""), data.get("Producer_Email",""),
+            data.get("Producer_Phone",""), data.get("Producer_Mobile",""),
+            data.get("Producer_Address",""), data.get("Producer_Town",""),
+            data.get("Producer_Zip",""), data.get("Profession",""),
+            data.get("Harvest_Date",""), data.get("Supervisor_Name",""),
+            data.get("Supervisor_Phone",""), data.get("Supervisor_Signature_Date",""),
+            data.get("Division",""), data.get("Previous_Crop",""),
+            data.get("Planting_Date",""), data.get("Wheat_Variety",""),
+            data.get("Row_Width_inches",""), data.get("Seeding_Rate",""),
+            data.get("Fall_N_lbA",""), data.get("Fall_P2O5_lbA",""),
+            data.get("Fall_K2O_lbA",""), data.get("Fall_Other_Fertilizer",""),
+            data.get("Winter_Spring_N1_Date",""), data.get("Winter_Spring_N1_lbA",""),
+            data.get("Winter_Spring_N2_Date",""), data.get("Winter_Spring_N2_lbA",""),
+            data.get("Manure_Used",""), data.get("Manure_Type",""),
+            data.get("Manure_TonsA",""), data.get("Manure_Date",""),
+            data.get("Growth_Regulator",""), data.get("Fall_Pest_Products",""),
+            data.get("Spring_Pest_Products",""), data.get("Heading_Flowering_Pest",""),
+            data.get("Biologicals_Other",""), data.get("Tillage_Used",""),
+            data.get("Harvest_Length_ft",""), data.get("Harvest_Width_ft",""),
+            data.get("Harvest_Area_ft2",""), data.get("Harvest_Acres",""),
+            r[0] if len(r)>0 else "", r[1] if len(r)>1 else "",
+            r[2] if len(r)>2 else "", data.get("Grain_Moisture_Avg",""),
+            data.get("Test_Weight_lbbu",""), data.get("Grain_Weight_lbs",""),
+            data.get("Official_Yield_BuAcre",""), data.get("Agent_Notes",""),
+            data.get("Scale_Ticket_Photo","[no photo]"),
         ]
-
-        # First entry — write header row first
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        base_url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}"
         if entry_id == 1:
-            header_row = [
+            hdr = [
                 "Entry ID","Submission Date","County","Area",
-                "Producer Name","Address","Town","Zip","Phone","Mobile","Profession",
-                "Harvest Date","Supervisor","Supervisor Sign Date",
+                "Producer Name","Producer Email","Phone","Mobile",
+                "Address","Town","Zip","Profession",
+                "Harvest Date","Supervisor Name","Supervisor Phone","Supervisor Sign Date",
                 "Division","Previous Crop","Planting Date","Wheat Variety",
                 "Row Width (in)","Seeding Rate",
                 "Fall N","Fall P2O5","Fall K2O","Fall Other",
@@ -211,101 +188,81 @@ def append_entry_to_sheet(data: dict, entry_id: int) -> str | None:
                 "Length ft","Width ft","Area ft2","Acres",
                 "Moisture 1","Moisture 2","Moisture 3","Moisture Avg",
                 "Test Wt","Grain Wt lbs","Official Yield Bu/A","Agent Notes",
+                "Scale Ticket Photo",
             ]
-            requests.post(
-                f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}"
-                f"/values/Sheet1!A1:append",
-                headers={"Authorization": f"Bearer {token}",
-                         "Content-Type": "application/json"},
-                params={"valueInputOption": "RAW"},
-                json={"values": [header_row]},
-                timeout=15,
-            )
-
-        # Append the data row
+            requests.post(f"{base_url}/values/Sheet1!A1:append",
+                          headers=headers, params={"valueInputOption":"RAW"},
+                          json={"values":[hdr]}, timeout=15)
         resp = requests.post(
-            f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}"
-            f"/values/Sheet1!A1:append",
-            headers={"Authorization": f"Bearer {token}",
-                     "Content-Type": "application/json"},
-            params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
-            json={"values": [row]},
-            timeout=15,
-        )
-
+            f"{base_url}/values/Sheet1!A1:append",
+            headers=headers,
+            params={"valueInputOption":"RAW","insertDataOption":"INSERT_ROWS"},
+            json={"values":[row]}, timeout=15)
         if resp.status_code == 200:
-            return f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+            return True
         st.session_state["_gd_error"] = f"Sheets HTTP {resp.status_code}: {resp.text[:300]}"
-        return None
-
+        return False
     except Exception as e:
         st.session_state["_gd_error"] = str(e)
-        return None
-
+        return False
 
 # ─────────────────────────────────────────────────────────
-# FORMSUBMIT
+# FORMSUBMIT  — server-side POST (no HTML form, no JS auto-fire)
+# Called directly from Python on submit. Never fires on page load.
 # ─────────────────────────────────────────────────────────
 
-def build_formsubmit_html(data: dict, entry_id: int,
-                           subject: str, gdrive_url: str = "") -> str:
-    area = COUNTY_AREA.get(data.get("County", ""), 4)
+def send_formsubmit_email(data: dict, entry_id: int, subject: str) -> bool:
+    """
+    POST directly to FormSubmit API from Python (server side).
+    This NEVER fires on page load — only when explicitly called.
+    No HTML form, no JavaScript, no auto-submit risk.
+    Returns True on success.
+    """
+    area = COUNTY_AREA.get(data.get("County",""), 4)
     r    = data.get("_moisture_list", [])
     readings_str = ", ".join(f"{x}%" for x in r) if r else "N/A"
 
     body = f"""KY WHEAT YIELD CONTEST — ENTRY #{entry_id}
 {'='*50}
-
-PRODUCER & AGENT
+PRODUCER
   County:        {data.get('County','')} (Area {area})
   Producer:      {data.get('Producer_Name','')}
-  Address:       {data.get('Producer_Address','')}, {data.get('Producer_Town','')} {data.get('Producer_Zip','')}
-  Phone:         {data.get('Producer_Phone','')} / Mobile: {data.get('Producer_Mobile','')}
-  Supervisor:    {data.get('Supervisor_Name','')} (signed {data.get('Supervisor_Signature_Date','')})
+  Email:         {data.get('Producer_Email','')}
+  Phone:         {data.get('Producer_Phone','')}
+  Supervisor:    {data.get('Supervisor_Name','')}  Ph: {data.get('Supervisor_Phone','')}
 
 AGRONOMIC
   Division:      {data.get('Division','')}
-  Previous Crop: {data.get('Previous_Crop','')}
-  Planting:      {data.get('Planting_Date','')}
-  Harvest:       {data.get('Harvest_Date','')}
   Variety:       {data.get('Wheat_Variety','')}
+  Harvest Date:  {data.get('Harvest_Date','')}
 
 HARVEST AREA
-  Dimensions:    {data.get('Harvest_Length_ft',0)} ft x {data.get('Harvest_Width_ft',0)} ft
-  Acres:         {data.get('Harvest_Acres',0):.2f}
+  {data.get('Harvest_Length_ft',0)} ft x {data.get('Harvest_Width_ft',0)} ft = {data.get('Harvest_Acres',0):.2f} acres
 
 GRAIN
-  Moisture:      {readings_str}  →  Avg {data.get('Grain_Moisture_Avg',0):.1f}%
-  Test Weight:   {data.get('Test_Weight_lbbu',60)} lb/bu
-  Grain Weight:  {data.get('Grain_Weight_lbs',0):,.0f} lbs
+  Moisture: {readings_str}  →  Avg {data.get('Grain_Moisture_Avg',0):.1f}%
+  Grain Weight: {data.get('Grain_Weight_lbs',0):,.0f} lbs
 
-OFFICIAL YIELD:  {data.get('Official_Yield_BuAcre',0):.2f} bu/acre
-
-MASTER EXCEL:    {gdrive_url if gdrive_url else '(download from app)'}
+OFFICIAL YIELD: {data.get('Official_Yield_BuAcre',0):.2f} bu/acre
 
 Submitted: {data.get('Submission_Date','')}"""
 
-    def h(name, value):
-        v = str(value).replace('"','&quot;').replace('<','&lt;').replace('>','&gt;')
-        return f'<input type="hidden" name="{name}" value="{v}">'
-
-    fields = "\n".join([
-        h("_subject",  subject),
-        h("_cc",       CC_EMAIL),
-        h("_captcha",  "false"),
-        h("_template", "box"),
-        h("Entry",     f"#{entry_id}"),
-        h("message",   body),
-    ])
-
-    return f"""
-    <form id="fsform" action="https://formsubmit.co/{FORMSUBMIT_EMAIL}" method="POST">
-      {fields}
-      <button type="submit" id="fsbtn" style="display:none">Send</button>
-    </form>
-    <script>setTimeout(function(){{document.getElementById('fsbtn').click();}},800);</script>
-    """
-
+    try:
+        resp = requests.post(
+            f"https://formsubmit.co/ajax/{FORMSUBMIT_EMAIL}",
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            json={
+                "subject":  subject,
+                "cc":       CC_EMAIL,
+                "_captcha": "false",
+                "message":  body,
+            },
+            timeout=15,
+        )
+        return resp.status_code == 200
+    except Exception as e:
+        st.session_state["_email_error"] = str(e)
+        return False
 
 # ─────────────────────────────────────────────────────────
 # SESSION STATE
@@ -318,10 +275,13 @@ def _blank_defaults():
     today = _today()
     return {
         "county": "— Select —",
-        "producer_name": "", "producer_address": "", "producer_town": "",
-        "producer_zip": "", "producer_phone": "", "producer_mobile": "",
-        "profession": "", "harvest_date": today,
-        "supervisor_name": "", "supervisor_sig_date": today,
+        "producer_name": "", "producer_email": "",
+        "producer_phone": "", "producer_mobile": "",
+        "producer_address": "", "producer_town": "",
+        "producer_zip": "", "profession": "",
+        "harvest_date": today,
+        "supervisor_name": "", "supervisor_phone": "",
+        "supervisor_sig_date": today,
         "division": "Division I - Tillage (conv./min.)",
         "previous_crop": "Corn",
         "planting_date": datetime.date(today.year - 1, 10, 1),
@@ -346,6 +306,8 @@ def _init_state():
     for k, v in _blank_defaults().items():
         if k not in st.session_state:
             st.session_state[k] = v
+    if "session_entries" not in st.session_state:
+        st.session_state["session_entries"] = []
 
 def _clear_form():
     for k, v in _blank_defaults().items():
@@ -385,7 +347,7 @@ def _clear_readings_cb():
     _recompute()
 
 # ─────────────────────────────────────────────────────────
-# EXCEL BUILDER
+# EXCEL BUILDER (local backup only)
 # ─────────────────────────────────────────────────────────
 
 def _thin_border():
@@ -408,37 +370,8 @@ def _dat(ws, row, col, value="", bg="FFFFFF"):
     c.border    = _thin_border()
     return c
 
-COLUMNS = [
-    "Entry_ID","Submission_Date","County","Area",
-    "Producer_Name","Producer_Address","Producer_Town","Producer_Zip",
-    "Producer_Phone","Producer_Mobile","Profession",
-    "Harvest_Date","Supervisor_Name","Supervisor_Signature_Date",
-    "Division","Previous_Crop","Planting_Date","Wheat_Variety",
-    "Row_Width_inches","Seeding_Rate",
-    "Fall_N_lbA","Fall_P2O5_lbA","Fall_K2O_lbA","Fall_Other_Fertilizer",
-    "Winter_Spring_N1_Date","Winter_Spring_N1_lbA",
-    "Winter_Spring_N2_Date","Winter_Spring_N2_lbA",
-    "Manure_Used","Manure_Type","Manure_TonsA","Manure_Date",
-    "Growth_Regulator","Fall_Pest_Products","Spring_Pest_Products",
-    "Heading_Flowering_Pest","Biologicals_Other","Tillage_Used",
-    "Harvest_Length_ft","Harvest_Width_ft","Harvest_Area_ft2","Harvest_Acres",
-    "Grain_Moisture_1","Grain_Moisture_2","Grain_Moisture_3","Grain_Moisture_Avg",
-    "Test_Weight_lbbu","Grain_Weight_lbs","Official_Yield_BuAcre","Agent_Notes",
-]
-
-SECTION_SPANS = [
-    ("Producer / Agent Info",  1, 14, "1F4E79"),
-    ("Agronomic Data",        15, 20, "375623"),
-    ("Fertilizer",            21, 32, "7B3F00"),
-    ("Pest Management",       33, 38, "6B2737"),
-    ("Harvest Area",          39, 42, "4A235A"),
-    ("Grain Characteristics", 43, 47, "7E5109"),
-    ("Yield Calculation",     48, 49, "1A5276"),
-    ("Notes",                 50, 50, "555555"),
-]
-
 def build_excel_with_entry(data: dict, filepath: str) -> int:
-    area = COUNTY_AREA.get(data.get("County", ""), 4)
+    area = COUNTY_AREA.get(data.get("County",""), 4)
     data["Area"] = area
     if Path(filepath).exists():
         wb = openpyxl.load_workbook(filepath)
@@ -454,7 +387,7 @@ def build_excel_with_entry(data: dict, filepath: str) -> int:
         ws.title = "Wheat Contest Entries"
         ws.merge_cells(f"A1:{get_column_letter(len(COLUMNS))}1")
         t = ws["A1"]
-        t.value     = "Kentucky Wheat Yield Contest - Master Entry Database"
+        t.value     = f"Kentucky Wheat Yield Contest {CURRENT_YEAR} - Master Entry Database"
         t.font      = Font(bold=True, size=14, color="FFFFFF", name="Arial")
         t.fill      = PatternFill("solid", fgColor=HEADER_FILL)
         t.alignment = Alignment(horizontal="center", vertical="center")
@@ -464,15 +397,10 @@ def build_excel_with_entry(data: dict, filepath: str) -> int:
             _hdr(ws, 2, c1, label, bg=color, size=9)
         ws.row_dimensions[2].height = 18
         for ci, col in enumerate(COLUMNS, 1):
-            _hdr(ws, 3, ci, col.replace("_", " "), bg="4A4A4A", size=9)
+            _hdr(ws, 3, ci, col.replace("_"," "), bg="4A4A4A", size=9)
         ws.row_dimensions[3].height = 42
-        widths = [
-            7,14,14,5,20,22,14,7,13,13,14,12,20,14,
-            14,14,12,18,8,16,8,8,8,20,12,8,12,8,8,14,8,12,
-            18,22,22,22,18,14,11,11,11,9,9,9,9,9,10,12,13,28,
-        ]
-        for i, w in enumerate(widths, 1):
-            ws.column_dimensions[get_column_letter(i)].width = w
+        for i in range(1, len(COLUMNS)+1):
+            ws.column_dimensions[get_column_letter(i)].width = 14
         ws.freeze_panes = "A4"
         entry_id = 1
     data["Entry_ID"]        = entry_id
@@ -480,7 +408,7 @@ def build_excel_with_entry(data: dict, filepath: str) -> int:
     row_num = ws.max_row + 1
     bg = "F7F9FC" if entry_id % 2 == 0 else "FFFFFF"
     for ci, col in enumerate(COLUMNS, 1):
-        _dat(ws, row_num, ci, data.get(col, ""), bg=bg)
+        _dat(ws, row_num, ci, data.get(col,""), bg=bg)
     wb.save(filepath)
     return entry_id
 
@@ -490,16 +418,69 @@ def build_excel_with_entry(data: dict, filepath: str) -> int:
 
 def main():
     _init_state()
-    st.set_page_config(page_title="KY Wheat Yield Contest", page_icon="🌾",
-                       layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title=f"KY Wheat Contest {CURRENT_YEAR}",
+                       page_icon="🌾", layout="wide",
+                       initial_sidebar_state="expanded")
+
     st.markdown("""
     <style>
     .main{background-color:#f0f4f8}
+
+    /* ── Hero header ── */
+    .hero-banner {
+        background: linear-gradient(135deg, #1a3a1a 0%, #2d5a27 40%, #4a7c3f 70%, #1F4E79 100%);
+        border-radius: 14px;
+        padding: 32px 40px 28px 40px;
+        margin-bottom: 24px;
+        position: relative;
+        overflow: hidden;
+        box-shadow: 0 6px 24px rgba(0,0,0,0.18);
+    }
+    .hero-banner::before {
+        content: "🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾";
+        position: absolute; top: 8px; left: 0; right: 0;
+        font-size: 1.4rem; opacity: 0.12; letter-spacing: 6px;
+        white-space: nowrap; overflow: hidden;
+    }
+    .hero-banner::after {
+        content: "🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾";
+        position: absolute; bottom: 8px; left: 0; right: 0;
+        font-size: 1.4rem; opacity: 0.12; letter-spacing: 6px;
+        white-space: nowrap; overflow: hidden;
+    }
+    .hero-title {
+        font-size: 2.4rem; font-weight: 800; color: #ffffff;
+        text-shadow: 0 2px 8px rgba(0,0,0,0.4);
+        margin: 0; line-height: 1.15; letter-spacing: -0.5px;
+    }
+    .hero-subtitle {
+        font-size: 1.05rem; color: #c8e6c9;
+        margin-top: 6px; font-weight: 400; letter-spacing: 0.3px;
+    }
+    .hero-year {
+        font-size: 3.2rem; font-weight: 900;
+        color: rgba(255,255,255,0.18);
+        position: absolute; right: 40px; top: 50%;
+        transform: translateY(-50%);
+        font-family: Georgia, serif; letter-spacing: -2px;
+    }
+    .hero-badge {
+        display: inline-block;
+        background: rgba(255,255,255,0.15);
+        border: 1px solid rgba(255,255,255,0.3);
+        border-radius: 20px; padding: 3px 14px;
+        font-size: 0.82rem; color: #e8f5e9;
+        margin-top: 10px; backdrop-filter: blur(4px);
+    }
+
+    /* ── Section headers ── */
     .sec-hdr{font-size:1.05rem;font-weight:700;padding:7px 14px;
              border-radius:5px;margin:20px 0 8px 0;color:white}
     .s1{background:#1F4E79}.s2{background:#375623}.s3{background:#7B3F00}
     .s4{background:#6B2737}.s5{background:#4A235A}.s6{background:#7E5109}
     .s7{background:#1A5276}.s8{background:#555555}
+
+    /* ── Metric boxes ── */
     .metric-box{background:#f8f9fa;border:1px solid #dee2e6;
                 border-radius:6px;padding:10px 14px;margin-top:4px}
     .metric-label{font-size:0.78rem;color:#6c757d;margin-bottom:2px}
@@ -509,61 +490,113 @@ def main():
                     font-size:0.88rem;display:inline-block;margin:2px 3px}
     .agreement-box{background:#fff3cd;border:2px solid #ffc107;
                    border-radius:8px;padding:16px 20px;margin:24px 0 8px 0}
+
+    /* ── Contact footer ── */
+    .contact-footer {
+        background: #f8f9fa; border: 1px solid #dee2e6;
+        border-radius: 10px; padding: 16px 20px;
+        text-align: center; margin-top: 30px;
+        font-size: 0.9rem; color: #555;
+    }
+    .contact-footer a {color: #1F4E79; font-weight: 600; text-decoration: none;}
     </style>
     """, unsafe_allow_html=True)
 
-    # Fire pending FormSubmit
-    pending = st.session_state.get("_pending_formsubmit")
-    if pending:
-        st.components.v1.html(pending, height=0)
-        st.session_state["_pending_formsubmit"] = None
+    # NOTE: No HTML form injection here — email is sent server-side
+    # directly in the submit handler via requests.post(). This prevents
+    # any accidental firing on page load or rerun.
 
-    # Header
-    col_h, col_clr = st.columns([6, 1])
-    with col_h:
-        st.markdown("## 🌾 Kentucky Wheat Yield Contest")
-        st.caption("University of Kentucky Cooperative Extension — Digital Entry Form")
+    # ── FIX 1: Beautiful dynamic hero header ─────────────
+    st.markdown(f"""
+    <div class="hero-banner">
+      <div class="hero-year">{CURRENT_YEAR}</div>
+      <div class="hero-title">🌾 Kentucky Wheat Yield Contest</div>
+      <div class="hero-subtitle">
+        University of Kentucky Cooperative Extension — Digital Entry Form
+      </div>
+      <div class="hero-badge">📅 Contest Year {CURRENT_YEAR} &nbsp;·&nbsp; Official Submission Portal</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_clr, _ = st.columns([1, 5])
     with col_clr:
-        st.markdown("<div style='margin-top:18px'></div>", unsafe_allow_html=True)
         if st.button("🔄 Clear Form", use_container_width=True):
             _clear_form()
     st.divider()
 
-    # Sidebar
+    # ── Sidebar ──────────────────────────────────────────
     with st.sidebar:
-        st.header("Settings")
+        st.markdown(f"### 🌾 KY Wheat Contest {CURRENT_YEAR}")
+        st.divider()
+
+        # FIX 4: Contest rules PDF download
+        st.markdown("**📄 Contest Rules**")
+        # Check if PDF was uploaded to the app
+        rules_path = Path("2025WheatYieldContestRules.pdf")
+        if rules_path.exists():
+            with open(rules_path, "rb") as f:
+                st.download_button(
+                    "⬇️ Download Contest Rules (PDF)",
+                    data=f, file_name="KY_Wheat_Contest_Rules.pdf",
+                    mime="application/pdf", use_container_width=True)
+        else:
+            st.info(
+                "**Contest Rules Summary:**\n"
+                "- Min. **1.5 acres** harvested\n"
+                "- Deadline: **July 31**\n"
+                "- Supervisor must witness harvest\n"
+                "- Submit grain sample to **Colette Laurent**, Princeton KY\n"
+                "- Official yield calculated at **13.5% moisture**\n\n"
+                "_Place `contest_rules.pdf` in app folder to enable PDF download._"
+            )
+        st.divider()
+
+        # Sheets status
         cfg = _gdrive_secrets()
         if all([cfg.get("client_email"), cfg.get("private_key"), cfg.get("sheet_id")]):
-            st.success("📊 Google Sheets: configured")
+            st.success("📊 Google Sheets: connected")
         else:
-            st.warning("📊 Google Sheets: secrets missing")
-            st.caption("Need: client_email, private_key, sheet_id")
+            st.warning("📊 Google Sheets: not configured")
         st.divider()
-        st.markdown("**Contest Rules**")
-        st.info("- Min. **1.5 acres** harvested\n- Deadline: **July 31**\n"
-                "- Supervisor must witness harvest\n"
-                "- Send grain sample to **Colette Laurent**, Princeton KY")
 
-    # ── SECTION 1 ──────────────────────────────────────
+        # FIX 8: Contact footer in sidebar
+        st.markdown("**📬 Need Help?**")
+        st.markdown(
+            f"Contact the Extension team:\n\n"
+            f"[✉️ {'Dr. Chad Lee'}](mailto:{CONTACT_EMAIL})"
+        )
+
+    # ════════════════════════════════════════════════════
+    # SECTION 1 — PRODUCER / AGENT
+    # FIX 2: email added, phone mandatory, profession moved up
+    # FIX 3: supervisor phone added
+    # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s1">👤 Section 1 — Producer & Agent Information</div>',
                 unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     with c1:
         st.selectbox("County *", ["— Select —"] + KY_COUNTIES, key="county")
         st.text_input("Producer Full Name *", key="producer_name")
+        st.text_input("Profession / Operation Type *", key="profession")
         st.text_input("Producer Address", key="producer_address")
     with c2:
-        st.text_input("Town", key="producer_town")
-        st.text_input("Zip Code", key="producer_zip")
-        st.text_input("Phone", key="producer_phone")
-    with c3:
+        st.text_input("Producer Email *", key="producer_email",
+                      placeholder="grower@email.com")
+        st.text_input("Phone * (required)", key="producer_phone",
+                      placeholder="270-555-1234")
         st.text_input("Mobile", key="producer_mobile")
-        st.text_input("Profession / Operation Type", key="profession")
-    c1, c2 = st.columns(2)
-    with c1: st.text_input("County Agent / Supervisor Name *", key="supervisor_name")
-    with c2: st.date_input("Supervisor Sign Date", key="supervisor_sig_date")
+        st.text_input("Town", key="producer_town")
+    with c3:
+        st.text_input("Zip Code", key="producer_zip")
+        st.date_input("Harvest Date *", key="harvest_date")
+        st.text_input("County Agent / Supervisor Name *", key="supervisor_name")
+        st.text_input("Supervisor Phone *", key="supervisor_phone",
+                      placeholder="270-555-5678")
+    st.date_input("Supervisor Sign Date", key="supervisor_sig_date")
 
-    # ── SECTION 2 ──────────────────────────────────────
+    # ════════════════════════════════════════════════════
+    # SECTION 2 — AGRONOMIC
+    # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s2">🌱 Section 2 — Agronomic Data</div>',
                 unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
@@ -574,13 +607,14 @@ def main():
         st.selectbox("Previous Crop", ["Corn","Soybeans","Other"], key="previous_crop")
     with c2:
         st.date_input("Planting Date *", key="planting_date")
-        st.date_input("Harvest Date *", key="harvest_date")
         st.text_input("Wheat Variety *", key="wheat_variety")
     with c3:
         st.text_input("Row Width (inches)", key="row_width")
         st.text_input("Seeding Rate (seeds/A or lb/A)", key="seeding_rate")
 
-    # ── SECTION 3 ──────────────────────────────────────
+    # ════════════════════════════════════════════════════
+    # SECTION 3 — FERTILIZER
+    # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s3">🧪 Section 3 — Fertilizer</div>',
                 unsafe_allow_html=True)
     st.caption("Fall Fertilizer (lb/acre)")
@@ -603,7 +637,9 @@ def main():
     with c3: st.text_input("Tons/A", key="manure_tons", disabled=not manure_on)
     with c4: st.date_input("Manure Date", key="manure_date", disabled=not manure_on)
 
-    # ── SECTION 4 ──────────────────────────────────────
+    # ════════════════════════════════════════════════════
+    # SECTION 4 — PEST MANAGEMENT
+    # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s4">🛡️ Section 4 — Pest Management & Other Inputs</div>',
                 unsafe_allow_html=True)
     c1, c2 = st.columns(2)
@@ -616,7 +652,9 @@ def main():
         st.text_area("Heading/Flowering Pest Products", height=68, key="heading_pest")
         st.text_input("Tillage Equipment / Method Used", key="tillage_used")
 
-    # ── SECTION 5 ──────────────────────────────────────
+    # ════════════════════════════════════════════════════
+    # SECTION 5 — HARVEST AREA
+    # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s5">📐 Section 5 — Harvest Area Measurement</div>',
                 unsafe_allow_html=True)
     st.info("Minimum harvest area: **1.50 acres** (65,340 sq ft).")
@@ -637,11 +675,13 @@ def main():
     with c4:
         cls = "metric-ok" if area_ok else "metric-warn"
         st.markdown(f'<div class="metric-box"><div class="metric-label">Acres — '
-                    f'{"OK" if area_ok else "Below min"}</div>'
+                    f'{"OK ✅" if area_ok else "Below min ❌"}</div>'
                     f'<div class="metric-value {cls}">{h_acres:.2f}</div></div>',
                     unsafe_allow_html=True)
 
-    # ── SECTION 6 ──────────────────────────────────────
+    # ════════════════════════════════════════════════════
+    # SECTION 6 — GRAIN CHARACTERISTICS
+    # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s6">🌡️ Section 6 — Grain Characteristics</div>',
                 unsafe_allow_html=True)
     readings_now = st.session_state.get("moisture_readings", [])
@@ -684,7 +724,9 @@ def main():
     st.number_input("Test Weight (lb/bu)", min_value=0.0, max_value=70.0,
                     step=0.1, format="%.1f", key="test_weight")
 
-    # ── SECTION 7 ──────────────────────────────────────
+    # ════════════════════════════════════════════════════
+    # SECTION 7 — YIELD
+    # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s7">📊 Section 7 — Yield Calculation</div>',
                 unsafe_allow_html=True)
     st.caption("Formula: lbs x [(100 - %moisture) / 86.5] / 60 lb/bu / acres")
@@ -705,12 +747,79 @@ def main():
                     f'<br>&divide;60 &divide;{h_acres:.2f}ac'
                     f'<br>= <b>{official_yield:.2f} bu/ac</b></div>', unsafe_allow_html=True)
 
-    # ── SECTION 8 ──────────────────────────────────────
-    st.markdown('<div class="sec-hdr s8">📝 Section 8 — Agent Notes</div>',
+    # ════════════════════════════════════════════════════
+    # SECTION 8 — NOTES + SCALE TICKET PHOTO
+    # ════════════════════════════════════════════════════
+    st.markdown('<div class="sec-hdr s8">📝 Section 8 — Notes & Scale Ticket Photo</div>',
                 unsafe_allow_html=True)
-    st.text_area("Additional notes, observations, or issues", height=80, key="agent_notes")
 
-    # ── CERTIFICATION ───────────────────────────────────
+    col_notes, col_photo = st.columns([1.1, 0.9], gap="large")
+
+    with col_notes:
+        st.markdown("""
+        <div style="background:#f8f9fa;border:1px solid #dee2e6;border-radius:10px;
+                    padding:18px 20px 6px 20px;margin-bottom:8px">
+          <div style="font-size:0.95rem;font-weight:700;color:#343a40;margin-bottom:6px">
+            📋 Agent Notes <span style="font-weight:400;color:#6c757d;font-size:0.85rem">
+            (optional)</span>
+          </div>
+          <div style="font-size:0.82rem;color:#6c757d;margin-bottom:10px">
+            Record any unusual field conditions, equipment issues, weather events,
+            or other observations relevant to this entry.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.text_area(
+            "Agent notes",
+            height=130,
+            key="agent_notes",
+            placeholder="e.g. Field had minor flooding in NE corner. Variety was "
+                        "planted late due to weather. Scale certified Oct 2025...",
+            label_visibility="collapsed",
+        )
+
+    with col_photo:
+        st.markdown("""
+        <div style="background:linear-gradient(135deg,#fff8e1,#fff3cd);
+                    border:2px dashed #ffc107;border-radius:10px;
+                    padding:18px 20px 10px 20px;margin-bottom:8px">
+          <div style="font-size:0.95rem;font-weight:700;color:#856404;margin-bottom:4px">
+            📷 Scale Ticket Photo <span style="font-weight:400;font-size:0.85rem">
+            (optional but recommended)</span>
+          </div>
+          <div style="font-size:0.82rem;color:#6c757d;margin-bottom:10px;line-height:1.5">
+            Upload a photo of the <b>certified scale ticket</b> showing grain weight.
+            Accepted: JPG, PNG, HEIC &nbsp;·&nbsp; Saved with your entry automatically.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        scale_photo = st.file_uploader(
+            "Upload scale ticket photo",
+            type=["jpg","jpeg","png","heic","webp"],
+            label_visibility="collapsed",
+        )
+
+        if scale_photo:
+            st.image(
+                scale_photo,
+                caption=f"✅ {scale_photo.name}  ({scale_photo.size/1024:.0f} KB)",
+                use_column_width=True,
+            )
+            st.success("Photo will be saved with this entry.")
+        else:
+            st.markdown("""
+            <div style="text-align:center;padding:20px 0;color:#adb5bd;font-size:2rem">
+              📄
+              <div style="font-size:0.82rem;margin-top:4px;color:#ced4da">
+                Drag & drop or click above to upload
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════
+    # CERTIFICATION + SUBMIT
+    # ════════════════════════════════════════════════════
     st.divider()
     st.markdown("""
     <div class="agreement-box">
@@ -731,13 +840,22 @@ def main():
                 key=f"agreement_checked_{agree_gen}", value=False)
     agreement = st.session_state.get(f"agreement_checked_{agree_gen}", False)
 
+    # Validation
     errors = []
     if st.session_state.get("county","— Select —") == "— Select —":
         errors.append("County not selected")
     if not st.session_state.get("producer_name","").strip():
         errors.append("Producer name missing")
+    if not st.session_state.get("producer_email","").strip():
+        errors.append("Producer email missing")
+    if not st.session_state.get("producer_phone","").strip():
+        errors.append("Producer phone missing (required)")
+    if not st.session_state.get("profession","").strip():
+        errors.append("Profession / operation type missing")
     if not st.session_state.get("supervisor_name","").strip():
         errors.append("Supervisor name missing")
+    if not st.session_state.get("supervisor_phone","").strip():
+        errors.append("Supervisor phone missing")
     if not st.session_state.get("wheat_variety","").strip():
         errors.append("Wheat variety missing")
     if st.session_state["h_acres"] < 1.50:
@@ -761,24 +879,35 @@ def main():
                                disabled=not form_ready, type="primary",
                                use_container_width=True)
 
-    # ── ON SUBMIT ───────────────────────────────────────
+    # ════════════════════════════════════════════════════
+    # ON SUBMIT
+    # ════════════════════════════════════════════════════
     if submit_clicked and form_ready:
         r   = st.session_state.get("moisture_readings", [])
         gm1 = r[0] if len(r) > 0 else ""
         gm2 = r[1] if len(r) > 1 else ""
         gm3 = r[2] if len(r) > 2 else ""
 
+        # FIX 5: encode photo as base64 if uploaded
+        photo_b64 = ""
+        if scale_photo:
+            photo_b64 = f"[photo:{scale_photo.name}|" \
+                        f"{base64.b64encode(scale_photo.getvalue()).decode()[:100]}...]"
+
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         data = {
             "County":                    st.session_state["county"],
             "Producer_Name":             st.session_state["producer_name"],
+            "Producer_Email":            st.session_state.get("producer_email",""),
+            "Producer_Phone":            st.session_state.get("producer_phone",""),
+            "Producer_Mobile":           st.session_state.get("producer_mobile",""),
             "Producer_Address":          st.session_state.get("producer_address",""),
             "Producer_Town":             st.session_state.get("producer_town",""),
             "Producer_Zip":              st.session_state.get("producer_zip",""),
-            "Producer_Phone":            st.session_state.get("producer_phone",""),
-            "Producer_Mobile":           st.session_state.get("producer_mobile",""),
             "Profession":                st.session_state.get("profession",""),
             "Harvest_Date":              str(st.session_state.get("harvest_date","")),
             "Supervisor_Name":           st.session_state["supervisor_name"],
+            "Supervisor_Phone":          st.session_state.get("supervisor_phone",""),
             "Supervisor_Signature_Date": str(st.session_state.get("supervisor_sig_date","")),
             "Division":                  st.session_state.get("division",""),
             "Previous_Crop":             st.session_state.get("previous_crop",""),
@@ -808,34 +937,32 @@ def main():
             "Harvest_Width_ft":          st.session_state["h_width"],
             "Harvest_Area_ft2":          st.session_state["h_area_ft2"],
             "Harvest_Acres":             st.session_state["h_acres"],
-            "Grain_Moisture_1":          gm1,
-            "Grain_Moisture_2":          gm2,
-            "Grain_Moisture_3":          gm3,
+            "Grain_Moisture_1":          gm1, "Grain_Moisture_2": gm2, "Grain_Moisture_3": gm3,
             "Grain_Moisture_Avg":        st.session_state["gm_avg"],
             "Test_Weight_lbbu":          st.session_state.get("test_weight",60.0),
             "Grain_Weight_lbs":          st.session_state["grain_weight"],
             "Official_Yield_BuAcre":     st.session_state["official_yield"],
             "Agent_Notes":               st.session_state.get("agent_notes",""),
+            "Scale_Ticket_Photo":        photo_b64 if photo_b64 else "[no photo]",
             "_moisture_list":            r,
+            "Submission_Date":           now_str,
         }
 
         try:
             entry_id = build_excel_with_entry(data, EXCEL_FILE)
             area     = COUNTY_AREA.get(data["County"], 4)
 
-            # 1. Append row to Google Sheet
+            # 1. Append to Google Sheet
             st.session_state["_gd_error"] = None
-            data["Submission_Date"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-            sheet_url = append_entry_to_sheet(data, entry_id)
+            sheet_ok = append_entry_to_sheet(data, entry_id)
 
-            # 2. Queue FormSubmit email
+            # 2. Send email server-side — ONLY on submit, never on page load
             subject = (f"KY Wheat Contest Entry #{entry_id} — "
                        f"{data['County']} County — {data['Producer_Name']}")
-            st.session_state["_pending_formsubmit"] = build_formsubmit_html(
-                data, entry_id, subject, gdrive_url=sheet_url or "")
+            email_ok = send_formsubmit_email(data, entry_id, subject)
 
             # 3. Success banner
-            st.success(f"✅ Entry #{entry_id} saved!")
+            st.success(f"✅ Entry #{entry_id} submitted successfully!")
             st.markdown(
                 f"**Producer:** {data['Producer_Name']} &nbsp;|&nbsp; "
                 f"**County:** {data['County']} (Area {area}) &nbsp;|&nbsp; "
@@ -847,52 +974,76 @@ def main():
 
             # 4. Status pills
             col1, col2, col3 = st.columns(3)
-            with col1:
-                st.success("📊 Excel saved")
+            with col1: st.success("📊 Saved to Excel")
             with col2:
-                if sheet_url:
-                    st.success(f"[📊 View Google Sheet]({sheet_url})")
+                if sheet_ok:
+                    st.success("☁️ Synced to Google Sheets")
                 else:
-                    st.warning("📊 Google Sheets failed")
+                    st.warning("☁️ Sheets sync failed")
                     gd_err = st.session_state.get("_gd_error","")
                     if gd_err:
-                        with st.expander("Show error detail"):
+                        with st.expander("Error detail"):
                             st.code(gd_err)
             with col3:
-                st.success("📧 Email notification sent")
+                if email_ok:
+                    st.success("📧 Email notification sent")
+                else:
+                    err = st.session_state.get("_email_error","")
+                    st.warning(f"📧 Email failed{': '+err if err else ''}")
 
-            # 5. Download button
+            # FIX 9: Download button — does NOT trigger email
             with open(EXCEL_FILE, "rb") as f:
-                st.download_button("⬇️ Download Master Excel", data=f,
-                                   file_name=EXCEL_FILENAME,
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.download_button(
+                    "⬇️ Download My Entry (Excel backup)",
+                    data=f, file_name=f"entry_{entry_id}_{data['County']}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    help="Download a local backup. This does NOT send another email."
+                )
 
+            # Track this session's entries
+            st.session_state["session_entries"].append({
+                "Entry #":   entry_id,
+                "Producer":  data["Producer_Name"],
+                "County":    data["County"],
+                "Yield Bu/A": f"{data['Official_Yield_BuAcre']:.2f}",
+                "Time":      now_str,
+            })
+
+            # Reset agreement for next entry
             st.session_state["_agree_gen"] = st.session_state.get("_agree_gen", 0) + 1
 
         except Exception as ex:
             st.error(f"Error saving entry: {ex}")
 
-    # ── ENTRIES TABLE ───────────────────────────────────
+    # ════════════════════════════════════════════════════
+    # FIX 6+7: Session entries — visible only to agent,
+    # no Google Sheet link shown
+    # ════════════════════════════════════════════════════
+    session_entries = st.session_state.get("session_entries", [])
+    if session_entries:
+        st.divider()
+        st.subheader(f"📋 Your Submissions This Session ({len(session_entries)})")
+        st.caption("These are the entries you submitted during this browser session. "
+                   "All entries are securely saved to the state office database.")
+        df_session = pd.DataFrame(session_entries)
+        st.dataframe(df_session, use_container_width=True, hide_index=True)
+
+    # ════════════════════════════════════════════════════
+    # FIX 8: Contact footer
+    # ════════════════════════════════════════════════════
     st.divider()
-    st.subheader("📋 Current Season Entries")
-    if Path(EXCEL_FILE).exists():
-        try:
-            df = pd.read_excel(EXCEL_FILE, header=2)
-            df = df.dropna(how="all")
-            show = ["Entry_ID","Submission_Date","County","Area","Producer_Name",
-                    "Division","Wheat_Variety","Harvest_Acres",
-                    "Official_Yield_BuAcre","Supervisor_Name"]
-            cols = [c for c in show if c in df.columns]
-            if len(df) > 0:
-                st.dataframe(df[cols].sort_values("Entry_ID", ascending=False),
-                             use_container_width=True, hide_index=True)
-                st.caption(f"Total entries: **{len(df)}**")
-            else:
-                st.info("No entries submitted yet.")
-        except Exception as e:
-            st.info(f"No entries yet: {e}")
-    else:
-        st.info("No entries saved yet. Submit the first entry above.")
+    st.markdown(f"""
+    <div class="contact-footer">
+        <b>Questions or issues with this form?</b><br>
+        Contact the UK Extension team:
+        <a href="mailto:{CONTACT_EMAIL}">✉️ {CONTACT_EMAIL}</a>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+        <span style="color:#888;font-size:0.82rem">
+        Kentucky Wheat Yield Contest {CURRENT_YEAR} &mdash;
+        University of Kentucky Cooperative Extension
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
