@@ -57,8 +57,8 @@ COLUMNS = [
     "Entry_ID","Submission_Date","County","Area",
     "Producer_Name","Producer_Email","Producer_Phone","Producer_Mobile",
     "Producer_Address","Producer_Town","Producer_Zip","Profession",
-    "Harvest_Date","Supervisor_Name","Supervisor_Phone","Supervisor_Signature_Date",
-    "Division","Previous_Crop","Planting_Date","Wheat_Variety",
+    "Supervisor_Name","Supervisor_Phone","Supervisor_Signature_Date",
+    "Division","Previous_Crop","Planting_Date","Harvest_Date","Wheat_Variety",
     "Row_Width_inches","Seeding_Rate",
     "Fall_N_lbA","Fall_P2O5_lbA","Fall_K2O_lbA","Fall_Other_Fertilizer",
     "Winter_Spring_N1_Date","Winter_Spring_N1_lbA",
@@ -73,8 +73,9 @@ COLUMNS = [
 ]
 
 SECTION_SPANS = [
-    ("Producer / Agent Info",  1, 16, "1F4E79"),
-    ("Agronomic Data",        17, 22, "375623"),
+    ("Producer Info",          1, 12, "1F4E79"),
+    ("Supervisor Info",       13, 15, "2E5FA3"),
+    ("Agronomic Data",        16, 22, "375623"),
     ("Fertilizer",            23, 34, "7B3F00"),
     ("Pest Management",       35, 40, "6B2737"),
     ("Harvest Area",          41, 44, "4A235A"),
@@ -128,13 +129,12 @@ def _get_sheets_token(client_email: str, private_key: str) -> str | None:
         return None
 
 def append_entry_to_sheet(data: dict, entry_id: int) -> bool:
-    """Append one row to Google Sheet. Returns True on success."""
     cfg          = _gdrive_secrets()
     client_email = cfg.get("client_email", "")
     private_key  = cfg.get("private_key", "")
     sheet_id     = cfg.get("sheet_id", "")
     if not all([client_email, private_key, sheet_id]):
-        st.session_state["_gd_error"] = "Missing secrets: client_email / private_key / sheet_id"
+        st.session_state["_gd_error"] = "Missing secrets"
         return False
     token = _get_sheets_token(client_email, private_key)
     if not token:
@@ -148,10 +148,11 @@ def append_entry_to_sheet(data: dict, entry_id: int) -> bool:
             data.get("Producer_Phone",""), data.get("Producer_Mobile",""),
             data.get("Producer_Address",""), data.get("Producer_Town",""),
             data.get("Producer_Zip",""), data.get("Profession",""),
-            data.get("Harvest_Date",""), data.get("Supervisor_Name",""),
-            data.get("Supervisor_Phone",""), data.get("Supervisor_Signature_Date",""),
+            data.get("Supervisor_Name",""), data.get("Supervisor_Phone",""),
+            data.get("Supervisor_Signature_Date",""),
             data.get("Division",""), data.get("Previous_Crop",""),
-            data.get("Planting_Date",""), data.get("Wheat_Variety",""),
+            data.get("Planting_Date",""), data.get("Harvest_Date",""),
+            data.get("Wheat_Variety",""),
             data.get("Row_Width_inches",""), data.get("Seeding_Rate",""),
             data.get("Fall_N_lbA",""), data.get("Fall_P2O5_lbA",""),
             data.get("Fall_K2O_lbA",""), data.get("Fall_Other_Fertilizer",""),
@@ -170,15 +171,15 @@ def append_entry_to_sheet(data: dict, entry_id: int) -> bool:
             data.get("Official_Yield_BuAcre",""), data.get("Agent_Notes",""),
             data.get("Scale_Ticket_Photo","[no photo]"),
         ]
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        headers  = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         base_url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}"
         if entry_id == 1:
             hdr = [
                 "Entry ID","Submission Date","County","Area",
                 "Producer Name","Producer Email","Phone","Mobile",
                 "Address","Town","Zip","Profession",
-                "Harvest Date","Supervisor Name","Supervisor Phone","Supervisor Sign Date",
-                "Division","Previous Crop","Planting Date","Wheat Variety",
+                "Supervisor Name","Supervisor Phone","Supervisor Sign Date",
+                "Division","Previous Crop","Planting Date","Harvest Date","Wheat Variety",
                 "Row Width (in)","Seeding Rate",
                 "Fall N","Fall P2O5","Fall K2O","Fall Other",
                 "Spring N1 Date","Spring N1 lb/A","Spring N2 Date","Spring N2 lb/A",
@@ -200,41 +201,34 @@ def append_entry_to_sheet(data: dict, entry_id: int) -> bool:
             json={"values":[row]}, timeout=15)
         if resp.status_code == 200:
             return True
-        st.session_state["_gd_error"] = f"Sheets HTTP {resp.status_code}: {resp.text[:300]}"
+        st.session_state["_gd_error"] = f"HTTP {resp.status_code}: {resp.text[:300]}"
         return False
     except Exception as e:
         st.session_state["_gd_error"] = str(e)
         return False
 
 # ─────────────────────────────────────────────────────────
-# FORMSUBMIT  — server-side POST (no HTML form, no JS auto-fire)
-# Called directly from Python on submit. Never fires on page load.
+# FORMSUBMIT — server-side, never fires on page load
 # ─────────────────────────────────────────────────────────
 
 def send_formsubmit_email(data: dict, entry_id: int, subject: str) -> bool:
-    """
-    POST directly to FormSubmit API from Python (server side).
-    This NEVER fires on page load — only when explicitly called.
-    No HTML form, no JavaScript, no auto-submit risk.
-    Returns True on success.
-    """
     area = COUNTY_AREA.get(data.get("County",""), 4)
     r    = data.get("_moisture_list", [])
     readings_str = ", ".join(f"{x}%" for x in r) if r else "N/A"
-
     body = f"""KY WHEAT YIELD CONTEST — ENTRY #{entry_id}
 {'='*50}
 PRODUCER
-  County:        {data.get('County','')} (Area {area})
-  Producer:      {data.get('Producer_Name','')}
-  Email:         {data.get('Producer_Email','')}
-  Phone:         {data.get('Producer_Phone','')}
-  Supervisor:    {data.get('Supervisor_Name','')}  Ph: {data.get('Supervisor_Phone','')}
+  County:       {data.get('County','')} (Area {area})
+  Producer:     {data.get('Producer_Name','')}
+  Email:        {data.get('Producer_Email','')}
+  Phone:        {data.get('Producer_Phone','')}
+  Supervisor:   {data.get('Supervisor_Name','')}  Ph: {data.get('Supervisor_Phone','')}
 
 AGRONOMIC
-  Division:      {data.get('Division','')}
-  Variety:       {data.get('Wheat_Variety','')}
-  Harvest Date:  {data.get('Harvest_Date','')}
+  Division:     {data.get('Division','')}
+  Variety:      {data.get('Wheat_Variety','')}
+  Planted:      {data.get('Planting_Date','')}
+  Harvested:    {data.get('Harvest_Date','')}
 
 HARVEST AREA
   {data.get('Harvest_Length_ft',0)} ft x {data.get('Harvest_Width_ft',0)} ft = {data.get('Harvest_Acres',0):.2f} acres
@@ -246,19 +240,13 @@ GRAIN
 OFFICIAL YIELD: {data.get('Official_Yield_BuAcre',0):.2f} bu/acre
 
 Submitted: {data.get('Submission_Date','')}"""
-
     try:
         resp = requests.post(
             f"https://formsubmit.co/ajax/{FORMSUBMIT_EMAIL}",
             headers={"Content-Type": "application/json", "Accept": "application/json"},
-            json={
-                "subject":  subject,
-                "cc":       CC_EMAIL,
-                "_captcha": "false",
-                "message":  body,
-            },
-            timeout=15,
-        )
+            json={"subject": subject, "cc": CC_EMAIL,
+                  "_captcha": "false", "message": body},
+            timeout=15)
         return resp.status_code == 200
     except Exception as e:
         st.session_state["_email_error"] = str(e)
@@ -279,12 +267,12 @@ def _blank_defaults():
         "producer_phone": "", "producer_mobile": "",
         "producer_address": "", "producer_town": "",
         "producer_zip": "", "profession": "",
-        "harvest_date": today,
         "supervisor_name": "", "supervisor_phone": "",
         "supervisor_sig_date": today,
         "division": "Division I - Tillage (conv./min.)",
         "previous_crop": "Corn",
         "planting_date": datetime.date(today.year - 1, 10, 1),
+        "harvest_date": today,
         "wheat_variety": "", "row_width": "", "seeding_rate": "",
         "fall_n": "0", "fall_p": "0", "fall_k": "0", "fall_other": "",
         "ws_n1_date": datetime.date(today.year, 3, 1), "ws_n1_rate": "0",
@@ -299,7 +287,7 @@ def _blank_defaults():
         "agent_notes": "",
         "h_area_ft2": 0.0, "h_acres": 0.0, "gm_avg": 0.0,
         "official_yield": 0.0, "_agree_gen": 0,
-        "_pending_formsubmit": None, "_gd_error": None,
+        "_gd_error": None,
     }
 
 def _init_state():
@@ -347,7 +335,7 @@ def _clear_readings_cb():
     _recompute()
 
 # ─────────────────────────────────────────────────────────
-# EXCEL BUILDER (local backup only)
+# EXCEL BUILDER
 # ─────────────────────────────────────────────────────────
 
 def _thin_border():
@@ -425,88 +413,49 @@ def main():
     st.markdown("""
     <style>
     .main{background-color:#f0f4f8}
-
-    /* ── Hero header ── */
-    .hero-banner {
-        background: linear-gradient(135deg, #1a3a1a 0%, #2d5a27 40%, #4a7c3f 70%, #1F4E79 100%);
-        border-radius: 14px;
-        padding: 32px 40px 28px 40px;
-        margin-bottom: 24px;
-        position: relative;
-        overflow: hidden;
-        box-shadow: 0 6px 24px rgba(0,0,0,0.18);
-    }
-    .hero-banner::before {
-        content: "🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾";
-        position: absolute; top: 8px; left: 0; right: 0;
-        font-size: 1.4rem; opacity: 0.12; letter-spacing: 6px;
-        white-space: nowrap; overflow: hidden;
-    }
-    .hero-banner::after {
-        content: "🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾";
-        position: absolute; bottom: 8px; left: 0; right: 0;
-        font-size: 1.4rem; opacity: 0.12; letter-spacing: 6px;
-        white-space: nowrap; overflow: hidden;
-    }
-    .hero-title {
-        font-size: 2.4rem; font-weight: 800; color: #ffffff;
-        text-shadow: 0 2px 8px rgba(0,0,0,0.4);
-        margin: 0; line-height: 1.15; letter-spacing: -0.5px;
-    }
-    .hero-subtitle {
-        font-size: 1.05rem; color: #c8e6c9;
-        margin-top: 6px; font-weight: 400; letter-spacing: 0.3px;
-    }
-    .hero-year {
-        font-size: 3.2rem; font-weight: 900;
-        color: rgba(255,255,255,0.18);
-        position: absolute; right: 40px; top: 50%;
-        transform: translateY(-50%);
-        font-family: Georgia, serif; letter-spacing: -2px;
-    }
-    .hero-badge {
-        display: inline-block;
-        background: rgba(255,255,255,0.15);
-        border: 1px solid rgba(255,255,255,0.3);
-        border-radius: 20px; padding: 3px 14px;
-        font-size: 0.82rem; color: #e8f5e9;
-        margin-top: 10px; backdrop-filter: blur(4px);
-    }
-
-    /* ── Section headers ── */
+    .hero-banner{background:linear-gradient(135deg,#1a3a1a 0%,#2d5a27 40%,#4a7c3f 70%,#1F4E79 100%);
+        border-radius:14px;padding:32px 40px 28px 40px;margin-bottom:24px;
+        position:relative;overflow:hidden;box-shadow:0 6px 24px rgba(0,0,0,0.18)}
+    .hero-banner::before{content:"🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾";
+        position:absolute;top:8px;left:0;right:0;font-size:1.4rem;opacity:0.12;
+        letter-spacing:6px;white-space:nowrap;overflow:hidden}
+    .hero-banner::after{content:"🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾🌾";
+        position:absolute;bottom:8px;left:0;right:0;font-size:1.4rem;opacity:0.12;
+        letter-spacing:6px;white-space:nowrap;overflow:hidden}
+    .hero-title{font-size:2.4rem;font-weight:800;color:#fff;
+        text-shadow:0 2px 8px rgba(0,0,0,0.4);margin:0;line-height:1.15;letter-spacing:-0.5px}
+    .hero-subtitle{font-size:1.05rem;color:#c8e6c9;margin-top:6px;font-weight:400;letter-spacing:0.3px}
+    .hero-year{font-size:3.2rem;font-weight:900;color:rgba(255,255,255,0.18);
+        position:absolute;right:40px;top:50%;transform:translateY(-50%);
+        font-family:Georgia,serif;letter-spacing:-2px}
+    .hero-badge{display:inline-block;background:rgba(255,255,255,0.15);
+        border:1px solid rgba(255,255,255,0.3);border-radius:20px;padding:3px 14px;
+        font-size:0.82rem;color:#e8f5e9;margin-top:10px;backdrop-filter:blur(4px)}
     .sec-hdr{font-size:1.05rem;font-weight:700;padding:7px 14px;
-             border-radius:5px;margin:20px 0 8px 0;color:white}
-    .s1{background:#1F4E79}.s2{background:#375623}.s3{background:#7B3F00}
-    .s4{background:#6B2737}.s5{background:#4A235A}.s6{background:#7E5109}
-    .s7{background:#1A5276}.s8{background:#555555}
-
-    /* ── Metric boxes ── */
+        border-radius:5px;margin:20px 0 8px 0;color:white}
+    .s1{background:#1F4E79}.s1b{background:#2E5FA3}.s2{background:#375623}
+    .s3{background:#7B3F00}.s4{background:#6B2737}.s5{background:#4A235A}
+    .s6{background:#7E5109}.s7{background:#1A5276}.s8{background:#555555}
+    /* Subsection divider inside Section 1 */
+    .sub-divider{border:none;border-top:2px dashed #cbd5e0;margin:18px 0 14px 0}
+    .sub-label{font-size:0.8rem;font-weight:700;text-transform:uppercase;
+        letter-spacing:0.8px;color:#718096;margin-bottom:8px;margin-top:4px}
     .metric-box{background:#f8f9fa;border:1px solid #dee2e6;
-                border-radius:6px;padding:10px 14px;margin-top:4px}
+        border-radius:6px;padding:10px 14px;margin-top:4px}
     .metric-label{font-size:0.78rem;color:#6c757d;margin-bottom:2px}
     .metric-value{font-size:1.5rem;font-weight:700;color:#212529}
     .metric-ok{color:#198754}.metric-warn{color:#dc3545}
     .moisture-badge{background:#e9ecef;border-radius:4px;padding:3px 9px;
-                    font-size:0.88rem;display:inline-block;margin:2px 3px}
+        font-size:0.88rem;display:inline-block;margin:2px 3px}
     .agreement-box{background:#fff3cd;border:2px solid #ffc107;
-                   border-radius:8px;padding:16px 20px;margin:24px 0 8px 0}
-
-    /* ── Contact footer ── */
-    .contact-footer {
-        background: #f8f9fa; border: 1px solid #dee2e6;
-        border-radius: 10px; padding: 16px 20px;
-        text-align: center; margin-top: 30px;
-        font-size: 0.9rem; color: #555;
-    }
-    .contact-footer a {color: #1F4E79; font-weight: 600; text-decoration: none;}
+        border-radius:8px;padding:16px 20px;margin:24px 0 8px 0}
+    .contact-footer{background:#f8f9fa;border:1px solid #dee2e6;border-radius:10px;
+        padding:16px 20px;text-align:center;margin-top:30px;font-size:0.9rem;color:#555}
+    .contact-footer a{color:#1F4E79;font-weight:600;text-decoration:none}
     </style>
     """, unsafe_allow_html=True)
 
-    # NOTE: No HTML form injection here — email is sent server-side
-    # directly in the submit handler via requests.post(). This prevents
-    # any accidental firing on page load or rerun.
-
-    # ── FIX 1: Beautiful dynamic hero header ─────────────
+    # ── Hero header ──────────────────────────────────────
     st.markdown(f"""
     <div class="hero-banner">
       <div class="hero-year">{CURRENT_YEAR}</div>
@@ -528,87 +477,81 @@ def main():
     with st.sidebar:
         st.markdown(f"### 🌾 KY Wheat Contest {CURRENT_YEAR}")
         st.divider()
-
-        # FIX 4: Contest rules PDF download
         st.markdown("**📄 Contest Rules**")
-        # Check if PDF was uploaded to the app
         rules_path = Path("2025WheatYieldContestRules.pdf")
         if rules_path.exists():
             with open(rules_path, "rb") as f:
-                st.download_button(
-                    "⬇️ Download Contest Rules (PDF)",
+                st.download_button("⬇️ Download Contest Rules (PDF)",
                     data=f, file_name="KY_Wheat_Contest_Rules.pdf",
                     mime="application/pdf", use_container_width=True)
         else:
             st.info(
-                "**Contest Rules Summary:**\n"
                 "- Min. **1.5 acres** harvested\n"
                 "- Deadline: **July 31**\n"
                 "- Supervisor must witness harvest\n"
                 "- Submit grain sample to **Colette Laurent**, Princeton KY\n"
-                "- Official yield calculated at **13.5% moisture**\n\n"
-                "_Place `contest_rules.pdf` in app folder to enable PDF download._"
+                "- Official yield at **13.5% moisture**\n\n"
+                "_Place `2025WheatYieldContestRules.pdf` in app folder to enable PDF download._"
             )
         st.divider()
-
-        # Sheets status
         cfg = _gdrive_secrets()
         if all([cfg.get("client_email"), cfg.get("private_key"), cfg.get("sheet_id")]):
             st.success("📊 Google Sheets: connected")
         else:
             st.warning("📊 Google Sheets: not configured")
-        st.divider()
-
-        # FIX 8: Contact footer in sidebar
-        #st.markdown("**📬 Need Help?**")
-        #st.markdown(
-        #    f"Contact the Extension team:\n\n"
-        #    f"[✉️ {'Dr. Chad Lee'}](mailto:{CONTACT_EMAIL})"
-        #)
 
     # ════════════════════════════════════════════════════
-    # SECTION 1 — PRODUCER / AGENT
-    # FIX 2: email added, phone mandatory, profession moved up
-    # FIX 3: supervisor phone added
+    # SECTION 1 — PRODUCER INFO  (grouped clearly)
     # ════════════════════════════════════════════════════
-    st.markdown('<div class="sec-hdr s1">👤 Section 1 — Producer & Agent Information</div>',
+    st.markdown('<div class="sec-hdr s1">👤 Section 1 — Producer & Supervisor Information</div>',
                 unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
-    with c1:
+
+    # ── Producer block ───────────────────────────────────
+    st.markdown('<div class="sub-label">🌿 Producer / Grower</div>', unsafe_allow_html=True)
+    p1, p2, p3 = st.columns(3)
+    with p1:
         st.selectbox("County *", ["— Select —"] + KY_COUNTIES, key="county")
         st.text_input("Producer Full Name *", key="producer_name")
         st.text_input("Profession / Operation Type *", key="profession")
-        st.text_input("Producer Address", key="producer_address")
-    with c2:
+    with p2:
         st.text_input("Producer Email *", key="producer_email",
                       placeholder="grower@email.com")
         st.text_input("Phone * (required)", key="producer_phone",
                       placeholder="270-555-1234")
         st.text_input("Mobile", key="producer_mobile")
-        st.text_input("Town", key="producer_town")
-    with c3:
+    with p3:
+        st.text_input("Street Address", key="producer_address")
+        st.text_input("Town / City", key="producer_town")
         st.text_input("Zip Code", key="producer_zip")
-        st.date_input("Harvest Date *", key="harvest_date")
-        st.text_input("County Agent / Supervisor Name *", key="supervisor_name")
+
+    # ── Supervisor block ─────────────────────────────────
+    st.markdown('<hr class="sub-divider"><div class="sub-label">🏛️ County Agent / Supervisor</div>',
+                unsafe_allow_html=True)
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        st.text_input("Supervisor Full Name *", key="supervisor_name")
+    with s2:
         st.text_input("Supervisor Phone *", key="supervisor_phone",
                       placeholder="270-555-5678")
-    st.date_input("Supervisor Sign Date", key="supervisor_sig_date")
+    with s3:
+        st.date_input("Supervisor Signature Date", key="supervisor_sig_date")
 
     # ════════════════════════════════════════════════════
-    # SECTION 2 — AGRONOMIC
+    # SECTION 2 — AGRONOMIC  (planting + harvest dates here)
     # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s2">🌱 Section 2 — Agronomic Data</div>',
                 unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
-    with c1:
+    a1, a2, a3 = st.columns(3)
+    with a1:
         st.radio("Contest Division *",
                  ["Division I - Tillage (conv./min.)", "Division II - No-Tillage"],
                  horizontal=True, key="division")
         st.selectbox("Previous Crop", ["Corn","Soybeans","Other"], key="previous_crop")
-    with c2:
-        st.date_input("Planting Date *", key="planting_date")
         st.text_input("Wheat Variety *", key="wheat_variety")
-    with c3:
+    with a2:
+        st.date_input("Planting Date *", key="planting_date")
+        st.date_input("Harvest Date *", key="harvest_date")
+    with a3:
         st.text_input("Row Width (inches)", key="row_width")
         st.text_input("Seeding Rate (seeds/A or lb/A)", key="seeding_rate")
 
@@ -752,16 +695,13 @@ def main():
     # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s8">📝 Section 8 — Notes & Scale Ticket Photo</div>',
                 unsafe_allow_html=True)
-
     col_notes, col_photo = st.columns([1.1, 0.9], gap="large")
-
     with col_notes:
         st.markdown("""
         <div style="background:#f8f9fa;border:1px solid #dee2e6;border-radius:10px;
                     padding:18px 20px 6px 20px;margin-bottom:8px">
           <div style="font-size:0.95rem;font-weight:700;color:#343a40;margin-bottom:6px">
-            📋 Agent Notes <span style="font-weight:400;color:#6c757d;font-size:0.85rem">
-            (optional)</span>
+            📋 Agent Notes <span style="font-weight:400;color:#6c757d;font-size:0.85rem">(optional)</span>
           </div>
           <div style="font-size:0.82rem;color:#6c757d;margin-bottom:10px">
             Record any unusual field conditions, equipment issues, weather events,
@@ -769,23 +709,18 @@ def main():
           </div>
         </div>
         """, unsafe_allow_html=True)
-        st.text_area(
-            "Agent notes",
-            height=130,
-            key="agent_notes",
-            placeholder="e.g. Field had minor flooding in NE corner. Variety was "
-                        "planted late due to weather. Scale certified Oct 2025...",
-            label_visibility="collapsed",
-        )
-
+        st.text_area("Agent notes", height=130, key="agent_notes",
+                     placeholder="e.g. Field had minor flooding in NE corner. "
+                                 "Scale certified Oct 2025...",
+                     label_visibility="collapsed")
     with col_photo:
         st.markdown("""
         <div style="background:linear-gradient(135deg,#fff8e1,#fff3cd);
                     border:2px dashed #ffc107;border-radius:10px;
                     padding:18px 20px 10px 20px;margin-bottom:8px">
           <div style="font-size:0.95rem;font-weight:700;color:#856404;margin-bottom:4px">
-            📷 Scale Ticket Photo <span style="font-weight:400;font-size:0.85rem">
-            (optional but recommended)</span>
+            📷 Scale Ticket Photo
+            <span style="font-weight:400;font-size:0.85rem">(optional but recommended)</span>
           </div>
           <div style="font-size:0.82rem;color:#6c757d;margin-bottom:10px;line-height:1.5">
             Upload a photo of the <b>certified scale ticket</b> showing grain weight.
@@ -793,29 +728,20 @@ def main():
           </div>
         </div>
         """, unsafe_allow_html=True)
-
-        scale_photo = st.file_uploader(
-            "Upload scale ticket photo",
-            type=["jpg","jpeg","png","heic","webp"],
-            label_visibility="collapsed",
-        )
-
+        scale_photo = st.file_uploader("Upload scale ticket photo",
+                                       type=["jpg","jpeg","png","heic","webp"],
+                                       label_visibility="collapsed")
         if scale_photo:
-            st.image(
-                scale_photo,
-                caption=f"✅ {scale_photo.name}  ({scale_photo.size/1024:.0f} KB)",
-                use_column_width=True,
-            )
+            st.image(scale_photo,
+                     caption=f"✅ {scale_photo.name}  ({scale_photo.size/1024:.0f} KB)",
+                     use_column_width=True)
             st.success("Photo will be saved with this entry.")
         else:
             st.markdown("""
             <div style="text-align:center;padding:20px 0;color:#adb5bd;font-size:2rem">
-              📄
-              <div style="font-size:0.82rem;margin-top:4px;color:#ced4da">
-                Drag & drop or click above to upload
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+              📄<div style="font-size:0.82rem;margin-top:4px;color:#ced4da">
+              Drag & drop or click above to upload</div>
+            </div>""", unsafe_allow_html=True)
 
     # ════════════════════════════════════════════════════
     # CERTIFICATION + SUBMIT
@@ -840,7 +766,6 @@ def main():
                 key=f"agreement_checked_{agree_gen}", value=False)
     agreement = st.session_state.get(f"agreement_checked_{agree_gen}", False)
 
-    # Validation
     errors = []
     if st.session_state.get("county","— Select —") == "— Select —":
         errors.append("County not selected")
@@ -877,7 +802,7 @@ def main():
 
     submit_clicked = st.button("💾  Save Entry & Send to State Office",
                                disabled=not form_ready, type="primary",
-                               use_container_width=False, width = 200)
+                               use_container_width=True)
 
     # ════════════════════════════════════════════════════
     # ON SUBMIT
@@ -887,13 +812,10 @@ def main():
         gm1 = r[0] if len(r) > 0 else ""
         gm2 = r[1] if len(r) > 1 else ""
         gm3 = r[2] if len(r) > 2 else ""
-
-        # FIX 5: encode photo as base64 if uploaded
         photo_b64 = ""
         if scale_photo:
-            photo_b64 = f"[photo:{scale_photo.name}|" \
-                        f"{base64.b64encode(scale_photo.getvalue()).decode()[:100]}...]"
-
+            photo_b64 = (f"[photo:{scale_photo.name}|"
+                         f"{base64.b64encode(scale_photo.getvalue()).decode()[:100]}...]")
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         data = {
             "County":                    st.session_state["county"],
@@ -905,13 +827,13 @@ def main():
             "Producer_Town":             st.session_state.get("producer_town",""),
             "Producer_Zip":              st.session_state.get("producer_zip",""),
             "Profession":                st.session_state.get("profession",""),
-            "Harvest_Date":              str(st.session_state.get("harvest_date","")),
             "Supervisor_Name":           st.session_state["supervisor_name"],
             "Supervisor_Phone":          st.session_state.get("supervisor_phone",""),
             "Supervisor_Signature_Date": str(st.session_state.get("supervisor_sig_date","")),
             "Division":                  st.session_state.get("division",""),
             "Previous_Crop":             st.session_state.get("previous_crop",""),
             "Planting_Date":             str(st.session_state.get("planting_date","")),
+            "Harvest_Date":              str(st.session_state.get("harvest_date","")),
             "Wheat_Variety":             st.session_state["wheat_variety"],
             "Row_Width_inches":          st.session_state.get("row_width",""),
             "Seeding_Rate":              st.session_state.get("seeding_rate",""),
@@ -947,21 +869,15 @@ def main():
             "_moisture_list":            r,
             "Submission_Date":           now_str,
         }
-
         try:
             entry_id = build_excel_with_entry(data, EXCEL_FILE)
             area     = COUNTY_AREA.get(data["County"], 4)
-
-            # 1. Append to Google Sheet
             st.session_state["_gd_error"] = None
             sheet_ok = append_entry_to_sheet(data, entry_id)
-
-            # 2. Send email server-side — ONLY on submit, never on page load
-            subject = (f"KY Wheat Contest Entry #{entry_id} — "
-                       f"{data['County']} County — {data['Producer_Name']}")
+            subject  = (f"KY Wheat Contest Entry #{entry_id} — "
+                        f"{data['County']} County — {data['Producer_Name']}")
             email_ok = send_formsubmit_email(data, entry_id, subject)
 
-            # 3. Success banner
             st.success(f"✅ Entry #{entry_id} submitted successfully!")
             st.markdown(
                 f"**Producer:** {data['Producer_Name']} &nbsp;|&nbsp; "
@@ -971,8 +887,6 @@ def main():
                 f"**Harvest Area:** {data['Harvest_Acres']:.2f} acres &nbsp;|&nbsp; "
                 f"**Grain Moisture:** {data['Grain_Moisture_Avg']:.1f}%"
             )
-
-            # 4. Status pills
             col1, col2, col3 = st.columns(3)
             with col1: st.success("📊 Saved to Excel")
             with col2:
@@ -980,57 +894,40 @@ def main():
                     st.success("☁️ Synced to Google Sheets")
                 else:
                     st.warning("☁️ Sheets sync failed")
-                    gd_err = st.session_state.get("_gd_error","")
-                    if gd_err:
+                    if st.session_state.get("_gd_error"):
                         with st.expander("Error detail"):
-                            st.code(gd_err)
+                            st.code(st.session_state["_gd_error"])
             with col3:
                 if email_ok:
                     st.success("📧 Email notification sent")
                 else:
-                    err = st.session_state.get("_email_error","")
-                    st.warning(f"📧 Email failed{': '+err if err else ''}")
+                    st.warning(f"📧 Email failed")
 
-            # FIX 9: Download button — does NOT trigger email
             with open(EXCEL_FILE, "rb") as f:
-                st.download_button(
-                    "⬇️ Download My Entry (Excel backup)",
-                    data=f, file_name=f"entry_{entry_id}_{data['County']}.xlsx",
+                st.download_button("⬇️ Download My Entry (Excel backup)", data=f,
+                    file_name=f"entry_{entry_id}_{data['County']}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    help="Download a local backup. This does NOT send another email."
-                )
+                    help="Download a local backup. This does NOT send another email.")
 
-            # Track this session's entries
             st.session_state["session_entries"].append({
-                "Entry #":   entry_id,
-                "Producer":  data["Producer_Name"],
-                "County":    data["County"],
-                "Yield Bu/A": f"{data['Official_Yield_BuAcre']:.2f}",
-                "Time":      now_str,
+                "Entry #": entry_id, "Producer": data["Producer_Name"],
+                "County": data["County"],
+                "Yield Bu/A": f"{data['Official_Yield_BuAcre']:.2f}", "Time": now_str,
             })
-
-            # Reset agreement for next entry
             st.session_state["_agree_gen"] = st.session_state.get("_agree_gen", 0) + 1
 
         except Exception as ex:
             st.error(f"Error saving entry: {ex}")
 
-    # ════════════════════════════════════════════════════
-    # FIX 6+7: Session entries — visible only to agent,
-    # no Google Sheet link shown
-    # ════════════════════════════════════════════════════
+    # ── Session entries ──────────────────────────────────
     session_entries = st.session_state.get("session_entries", [])
     if session_entries:
         st.divider()
         st.subheader(f"📋 Your Submissions This Session ({len(session_entries)})")
-        st.caption("These are the entries you submitted during this browser session. "
-                   "All entries are securely saved to the state office database.")
-        df_session = pd.DataFrame(session_entries)
-        st.dataframe(df_session, use_container_width=True, hide_index=True)
+        st.caption("Entries submitted during this browser session — securely saved to the state office.")
+        st.dataframe(pd.DataFrame(session_entries), use_container_width=True, hide_index=True)
 
-    # ════════════════════════════════════════════════════
-    # FIX 8: Contact footer
-    # ════════════════════════════════════════════════════
+    # ── Contact footer ───────────────────────────────────
     st.divider()
     st.markdown(f"""
     <div class="contact-footer">
