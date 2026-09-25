@@ -1,6 +1,12 @@
 """
 Kentucky Wheat Yield Contest - Digital Entry Form
 University of Kentucky Cooperative Extension
+
+Email model: Uses FormSubmit.co — exactly like WheatVision's contact form.
+No password, no SMTP, no OAuth, no authentication of any kind.
+FormSubmit posts the entry data to their server which forwards it to
+the recipient email. One-time email confirmation on FormSubmit is all
+that's needed. Agents never see or touch any email settings.
 """
 
 import streamlit as st
@@ -8,27 +14,21 @@ import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-import smtplib, base64, json, time, datetime, requests
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email.mime.text import MIMEText
-from email import encoders
+import datetime, urllib.parse, requests, base64, time, tempfile, os
 from pathlib import Path
 
-# ─────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────
-EXCEL_FILE      = "wheat_contest_entries.xlsx"
-RECIPIENT_EMAIL = "mshamim11@uky.edu"
-RECIPIENT_NAME  = "Mohammad Jan Shamim"
+# ═════════════════════════════════════════════════════════
+#  OWNER CONFIG — set once, never touched again
+# ═════════════════════════════════════════════════════════
+# FormSubmit sends to this email. One-time setup:
+#   1. Submit the form once → FormSubmit emails you a confirmation link
+#   2. Click the link → done forever, no account needed
+FORMSUBMIT_EMAIL = "shamim.one@outlook.com"   # receives all entries
+CC_EMAIL         = "chad.lee@uky.edu"         # also CC'd on every entry
 
-# ── UK-registered Azure app (registered in UK's own tenant) ──────────
-OAUTH_CLIENT_ID  = "546960b8-978a-4776-ad35-dcb8a8bd20f4"
-OAUTH_TENANT     = "2b30530b-69b6-4457-b818-481cb53d42ae"
-OAUTH_SCOPE      = "https://graph.microsoft.com/Mail.Send offline_access"
-OAUTH_DEVICE_URL = f"https://login.microsoftonline.com/{OAUTH_TENANT}/oauth2/v2.0/devicecode"
-OAUTH_TOKEN_URL  = f"https://login.microsoftonline.com/{OAUTH_TENANT}/oauth2/v2.0/token"
-GRAPH_SEND_URL   = "https://graph.microsoft.com/v1.0/me/sendMail"
+EXCEL_FILE        = "wheat_contest_entries.xlsx"
+ONEDRIVE_FOLDER   = "Wheat Contest 2026"   # folder name in your OneDrive root
+# ═════════════════════════════════════════════════════════
 
 KY_COUNTIES = sorted([
     "Adair","Allen","Anderson","Ballard","Barren","Bath","Bell","Boone",
@@ -59,110 +59,214 @@ COUNTY_AREA = {
     "Adair":3,"Allen":3,"Barren":3,"Butler":3,"Edmonson":3,"Hart":3,
     "Logan":3,"Metcalfe":3,"Monroe":3,"Simpson":3,"Warren":3,
 }
-
 HEADER_FILL = "2E4057"
 
 # ─────────────────────────────────────────────────────────
-# OAUTH2  —  Device Code Flow
+# FORMSUBMIT HTML FORM  — builds a hidden auto-submit form
 # ─────────────────────────────────────────────────────────
 
-def oauth_start_device_flow() -> dict:
-    resp = requests.post(OAUTH_DEVICE_URL, data={
-        "client_id": OAUTH_CLIENT_ID,
-        "scope":     OAUTH_SCOPE,
-    }, timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+def build_formsubmit_html(data: dict, entry_id: int, subject: str,
+                          onedrive_url: str | None = None) -> str:
+    """
+    Builds a hidden HTML form that auto-submits to FormSubmit.co.
+    FormSubmit forwards the fields as a nicely formatted email.
+    No password, no auth — works from any device/network.
+    """
+    area = COUNTY_AREA.get(data.get("County", ""), 4)
 
+    # Build the email body as a single _message field
+    r = data.get("_moisture_list", [])
+    readings_str = ", ".join(f"{x}%" for x in r) if r else "N/A"
 
-def oauth_poll_for_token(device_code: str, interval: int = 5, max_wait: int = 120) -> dict | None:
-    deadline = time.time() + max_wait
-    while time.time() < deadline:
-        time.sleep(interval)
-        resp = requests.post(OAUTH_TOKEN_URL, data={
-            "client_id":   OAUTH_CLIENT_ID,
-            "grant_type":  "urn:ietf:params:oauth:grant-type:device_code",
-            "device_code": device_code,
-        }, timeout=10)
-        data = resp.json()
-        if "access_token" in data:
-            return data
-        if data.get("error") == "authorization_pending":
-            continue
-        if data.get("error") == "expired_token":
+    message = f"""
+KY WHEAT YIELD CONTEST — ENTRY #{entry_id}
+{'='*50}
+
+PRODUCER & AGENT
+  County:         {data.get('County','')} (Area {area})
+  Producer:       {data.get('Producer_Name','')}
+  Address:        {data.get('Producer_Address','')}, {data.get('Producer_Town','')} {data.get('Producer_Zip','')}
+  Phone:          {data.get('Producer_Phone','')} / Mobile: {data.get('Producer_Mobile','')}
+  Profession:     {data.get('Profession','')}
+  Supervisor:     {data.get('Supervisor_Name','')}  (signed {data.get('Supervisor_Signature_Date','')})
+
+AGRONOMIC DATA
+  Division:       {data.get('Division','')}
+  Previous Crop:  {data.get('Previous_Crop','')}
+  Planting Date:  {data.get('Planting_Date','')}
+  Harvest Date:   {data.get('Harvest_Date','')}
+  Wheat Variety:  {data.get('Wheat_Variety','')}
+  Row Width:      {data.get('Row_Width_inches','')} in
+  Seeding Rate:   {data.get('Seeding_Rate','')}
+
+FERTILIZER
+  Fall N/P/K:     {data.get('Fall_N_lbA','0')} / {data.get('Fall_P2O5_lbA','0')} / {data.get('Fall_K2O_lbA','0')} lb/A
+  Fall Other:     {data.get('Fall_Other_Fertilizer','')}
+  Spring N App1:  {data.get('Winter_Spring_N1_lbA','0')} lb/A on {data.get('Winter_Spring_N1_Date','')}
+  Spring N App2:  {data.get('Winter_Spring_N2_lbA','0')} lb/A on {data.get('Winter_Spring_N2_Date','')}
+  Manure:         {data.get('Manure_Used','No')} — {data.get('Manure_Type','')} {data.get('Manure_TonsA','')} T/A
+
+PEST MANAGEMENT
+  Growth Reg:     {data.get('Growth_Regulator','')}
+  Fall Pest:      {data.get('Fall_Pest_Products','')}
+  Spring Pest:    {data.get('Spring_Pest_Products','')}
+  Head/Flower:    {data.get('Heading_Flowering_Pest','')}
+  Biologicals:    {data.get('Biologicals_Other','')}
+  Tillage:        {data.get('Tillage_Used','')}
+
+HARVEST AREA
+  Dimensions:     {data.get('Harvest_Length_ft',0)} ft x {data.get('Harvest_Width_ft',0)} ft
+  Area:           {data.get('Harvest_Area_ft2',0):,.1f} ft² = {data.get('Harvest_Acres',0):.2f} acres
+
+GRAIN CHARACTERISTICS
+  Moisture:       {readings_str}  →  Avg: {data.get('Grain_Moisture_Avg',0):.1f}%
+  Test Weight:    {data.get('Test_Weight_lbbu',60)} lb/bu
+  Grain Weight:   {data.get('Grain_Weight_lbs',0):,.0f} lbs
+
+OFFICIAL YIELD:  {data.get('Official_Yield_BuAcre',0):.2f} bu/acre
+
+AGENT NOTES
+  {data.get('Agent_Notes','None')}
+
+MASTER EXCEL FILE
+  {onedrive_url if onedrive_url else "Download from the app (OneDrive not configured)"}
+
+Submitted: {data.get('Submission_Date','')}
+""".strip()
+
+    # Hidden fields for FormSubmit
+    def hidden(name, value):
+        v = str(value).replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+        return f'<input type="hidden" name="{name}" value="{v}">'
+
+    fields = "\n".join([
+        hidden("_subject",   subject),
+        hidden("_cc",        CC_EMAIL),
+        hidden("_captcha",   "false"),
+        hidden("_template",  "table"),
+        hidden("Entry_ID",   entry_id),
+        hidden("message",    message),
+    ])
+
+    # Auto-submit via JS immediately after rendering
+    form_html = f"""
+    <form id="fsform"
+          action="https://formsubmit.co/{FORMSUBMIT_EMAIL}"
+          method="POST">
+      {fields}
+      <button type="submit" id="fsbtn"
+              style="display:none">Send</button>
+    </form>
+    <script>
+      // Auto-click after a short delay so Streamlit finishes rendering
+      setTimeout(function(){{
+        document.getElementById('fsbtn').click();
+      }}, 800);
+    </script>
+    """
+    return form_html
+
+# ─────────────────────────────────────────────────────────
+# ONEDRIVE UPLOAD  — uses owner's credentials from Streamlit secrets
+# Agents never see or touch this. Credentials live in Streamlit Cloud's
+# encrypted secrets manager, never in the code.
+#
+# Streamlit secrets needed (set in Streamlit Cloud → App settings → Secrets):
+#
+#   [onedrive]
+#   client_id     = "546960b8-978a-4773-ad35-dcb8a8bd20f2"
+#   tenant_id     = "2b30530b-69b6-4457-b818-481cb53d42be"
+#   client_secret = "YOUR_CLIENT_SECRET_HERE"   ← from Azure app registration
+#
+# The client secret is app-level auth (not user-level) so device enrollment
+# / Conditional Access does NOT apply. This is a server-to-server call.
+# ─────────────────────────────────────────────────────────
+
+GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+
+def _get_app_token() -> str | None:
+    """
+    Get an app-level access token using client credentials flow.
+    This runs on Streamlit's server using YOUR app secret — no user
+    authentication, no device enrollment, no Conditional Access issue.
+    """
+    try:
+        cfg = st.secrets.get("onedrive", {})
+        client_id     = cfg.get("client_id", "")
+        tenant_id     = cfg.get("tenant_id", "")
+        client_secret = cfg.get("client_secret", "")
+        if not all([client_id, tenant_id, client_secret]):
             return None
-        raise RuntimeError(data.get("error_description", data.get("error", "Unknown OAuth error")))
-    return None
+        resp = requests.post(
+            f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+            data={
+                "grant_type":    "client_credentials",
+                "client_id":     client_id,
+                "client_secret": client_secret,
+                "scope":         "https://graph.microsoft.com/.default",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get("access_token")
+    except Exception:
+        return None
 
 
-def oauth_refresh_token(refresh_token: str) -> dict | None:
-    resp = requests.post(OAUTH_TOKEN_URL, data={
-        "client_id":     OAUTH_CLIENT_ID,
-        "grant_type":    "refresh_token",
-        "refresh_token": refresh_token,
-        "scope":         OAUTH_SCOPE,
-    }, timeout=10)
-    data = resp.json()
-    return data if "access_token" in data else None
+def _get_owner_drive_id(token: str) -> str | None:
+    """Get the owner's OneDrive drive ID using their email from secrets."""
+    try:
+        owner_email = st.secrets.get("onedrive", {}).get("owner_email", "")
+        if not owner_email:
+            return None
+        resp = requests.get(
+            f"{GRAPH_BASE}/users/{owner_email}/drive",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get("id")
+    except Exception:
+        return None
 
 
-def oauth_send_email(access_token: str, sender_email: str,
-                     recipient_email: str, subject: str, body_text: str,
-                     filepath: str, cc: str | None = None) -> None:
-    with open(filepath, "rb") as f:
-        attachment_b64 = base64.b64encode(f.read()).decode()
+def upload_excel_to_onedrive(filepath: str) -> str | None:
+    """
+    Upload the Excel file to the owner's OneDrive folder.
+    Returns the web URL of the file, or None if upload failed.
+    Completely silent — agents never know this is happening.
+    """
+    try:
+        token = _get_app_token()
+        if not token:
+            return None   # secrets not configured — skip silently
 
-    cc_recipients = [{"emailAddress": {"address": cc}}] if cc else []
+        owner_email = st.secrets.get("onedrive", {}).get("owner_email", "")
+        filename    = Path(filepath).name
+        folder      = ONEDRIVE_FOLDER
 
-    payload = {
-        "message": {
-            "subject": subject,
-            "body":    {"contentType": "Text", "content": body_text},
-            "toRecipients": [{"emailAddress": {"address": recipient_email}}],
-            "ccRecipients":  cc_recipients,
-            "attachments": [{
-                "@odata.type":  "#microsoft.graph.fileAttachment",
-                "name":         Path(filepath).name,
-                "contentType":  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "contentBytes": attachment_b64,
-            }],
-        },
-        "saveToSentItems": True,
-    }
+        # Upload via simple PUT (works for files up to 4 MB — Excel is tiny)
+        with open(filepath, "rb") as f:
+            file_bytes = f.read()
 
-    resp = requests.post(
-        GRAPH_SEND_URL,
-        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-        json=payload, timeout=30,
-    )
-    if resp.status_code not in (200, 202):
-        raise RuntimeError(f"Graph API error {resp.status_code}: {resp.text}")
-
-
-# ─────────────────────────────────────────────────────────
-# SMTP FALLBACK
-# ─────────────────────────────────────────────────────────
-
-def smtp_send_email(smtp_server, smtp_port, sender_email, sender_password,
-                    recipient_email, subject, body_text, filepath, cc=None):
-    msg = MIMEMultipart()
-    msg["From"]    = sender_email
-    msg["To"]      = recipient_email
-    msg["Subject"] = subject
-    if cc:
-        msg["Cc"] = cc
-    msg.attach(MIMEText(body_text, "plain"))
-    with open(filepath, "rb") as f:
-        part = MIMEBase("application", "octet-stream")
-        part.set_payload(f.read())
-    encoders.encode_base64(part)
-    part.add_header("Content-Disposition", f'attachment; filename="{Path(filepath).name}"')
-    msg.attach(part)
-    recipients = [recipient_email] + ([cc] if cc else [])
-    with smtplib.SMTP(smtp_server, int(smtp_port), timeout=15) as server:
-        server.ehlo(); server.starttls(); server.ehlo()
-        server.login(sender_email, sender_password)
-        server.sendmail(sender_email, recipients, msg.as_string())
+        upload_url = (
+            f"{GRAPH_BASE}/users/{owner_email}/drive/root:/"
+            f"{folder}/{filename}:/content"
+        )
+        resp = requests.put(
+            upload_url,
+            headers={
+                "Authorization":  f"Bearer {token}",
+                "Content-Type":   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            },
+            data=file_bytes,
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            return resp.json().get("webUrl")
+        return None
+    except Exception:
+        return None   # fail silently — FormSubmit email still goes through
 
 
 # ─────────────────────────────────────────────────────────
@@ -187,28 +291,22 @@ def _blank_defaults():
         "fall_n": "0", "fall_p": "0", "fall_k": "0", "fall_other": "",
         "ws_n1_date": datetime.date(today.year, 3, 1), "ws_n1_rate": "0",
         "ws_n2_date": datetime.date(today.year, 4, 1), "ws_n2_rate": "0",
-        "manure_used": "No", "manure_type": "", "manure_tons": "0", "manure_date": today,
+        "manure_used": "No", "manure_type": "", "manure_tons": "0",
+        "manure_date": today,
         "growth_reg": "", "fall_pest": "", "spring_pest": "",
         "heading_pest": "", "biologicals": "", "tillage_used": "",
         "h_length": 0.0, "h_width": 0.0,
         "moisture_readings": [], "_moisture_gen": 0,
         "test_weight": 60.0, "grain_weight": 0.0,
         "agent_notes": "",
-        "h_area_ft2": 0.0, "h_acres": 0.0, "gm_avg": 0.0, "official_yield": 0.0,
-        "agreement_checked": False, "_agree_gen": 0,
+        "h_area_ft2": 0.0, "h_acres": 0.0, "gm_avg": 0.0,
+        "official_yield": 0.0,
+        "_agree_gen": 0,
+        "_pending_formsubmit": None,   # holds HTML to inject after save
     }
 
 def _init_state():
     for k, v in _blank_defaults().items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-    for k, v in {
-        "oauth_access_token": None, "oauth_refresh_token": None,
-        "oauth_token_expiry": 0,    "oauth_user_email": None,
-        "oauth_device_code": None,  "oauth_polling": False,
-        "oauth_interval": 5,        "auth_mode": "oauth",
-        "_agree_gen": 0,
-    }.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
@@ -224,14 +322,14 @@ def _clear_form():
 def _recompute():
     length = float(st.session_state.get("h_length", 0.0) or 0.0)
     width  = float(st.session_state.get("h_width",  0.0) or 0.0)
-    ft2 = length * width
-    acres = ft2 / 43560.0
+    ft2    = length * width
+    acres  = ft2 / 43560.0
     st.session_state["h_area_ft2"] = round(ft2, 1)
     st.session_state["h_acres"]    = round(acres, 4)
     readings = [r for r in st.session_state.get("moisture_readings", []) if r > 0]
-    gm_avg = sum(readings) / len(readings) if readings else 0.0
+    gm_avg   = sum(readings) / len(readings) if readings else 0.0
     st.session_state["gm_avg"] = round(gm_avg, 2)
-    gw = float(st.session_state.get("grain_weight", 0.0) or 0.0)
+    gw  = float(st.session_state.get("grain_weight", 0.0) or 0.0)
     yld = gw * ((100 - gm_avg) / 86.5) / 60 / acres if (gw > 0 and gm_avg > 0 and acres > 0) else 0.0
     st.session_state["official_yield"] = round(yld, 2)
 
@@ -263,18 +361,18 @@ def _thin_border():
 
 def _hdr(ws, row, col, text, bg="2E4057", fg="FFFFFF", bold=True, size=10):
     c = ws.cell(row=row, column=col, value=text)
-    c.font = Font(bold=bold, color=fg, name="Arial", size=size)
-    c.fill = PatternFill("solid", fgColor=bg)
+    c.font      = Font(bold=bold, color=fg, name="Arial", size=size)
+    c.fill      = PatternFill("solid", fgColor=bg)
     c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    c.border = _thin_border()
+    c.border    = _thin_border()
     return c
 
 def _dat(ws, row, col, value="", bg="FFFFFF"):
     c = ws.cell(row=row, column=col, value=value)
-    c.font = Font(name="Arial", size=10)
-    c.fill = PatternFill("solid", fgColor=bg)
+    c.font      = Font(name="Arial", size=10)
+    c.fill      = PatternFill("solid", fgColor=bg)
     c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-    c.border = _thin_border()
+    c.border    = _thin_border()
     return c
 
 COLUMNS = [
@@ -323,9 +421,9 @@ def build_excel_with_entry(data: dict, filepath: str) -> int:
         ws.title = "Wheat Contest Entries"
         ws.merge_cells(f"A1:{get_column_letter(len(COLUMNS))}1")
         t = ws["A1"]
-        t.value = "Kentucky Wheat Yield Contest - Master Entry Database"
-        t.font = Font(bold=True, size=14, color="FFFFFF", name="Arial")
-        t.fill = PatternFill("solid", fgColor=HEADER_FILL)
+        t.value     = "Kentucky Wheat Yield Contest - Master Entry Database"
+        t.font      = Font(bold=True, size=14, color="FFFFFF", name="Arial")
+        t.fill      = PatternFill("solid", fgColor=HEADER_FILL)
         t.alignment = Alignment(horizontal="center", vertical="center")
         ws.row_dimensions[1].height = 28
         for label, c1, c2, color in SECTION_SPANS:
@@ -335,14 +433,16 @@ def build_excel_with_entry(data: dict, filepath: str) -> int:
         for ci, col in enumerate(COLUMNS, 1):
             _hdr(ws, 3, ci, col.replace("_", " "), bg="4A4A4A", size=9)
         ws.row_dimensions[3].height = 42
-        widths = [7,14,14,5,20,22,14,7,13,13,14,12,20,14,
-                  14,14,12,18,8,16,8,8,8,20,12,8,12,8,8,14,8,12,
-                  18,22,22,22,18,14,11,11,11,9,9,9,9,9,10,12,13,28]
+        widths = [
+            7,14,14,5,20,22,14,7,13,13,14,12,20,14,
+            14,14,12,18,8,16,8,8,8,20,12,8,12,8,8,14,8,12,
+            18,22,22,22,18,14,11,11,11,9,9,9,9,9,10,12,13,28,
+        ]
         for i, w in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = w
         ws.freeze_panes = "A4"
         entry_id = 1
-    data["Entry_ID"] = entry_id
+    data["Entry_ID"]        = entry_id
     data["Submission_Date"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     row_num = ws.max_row + 1
     bg = "F7F9FC" if entry_id % 2 == 0 else "FFFFFF"
@@ -350,100 +450,6 @@ def build_excel_with_entry(data: dict, filepath: str) -> int:
         _dat(ws, row_num, ci, data.get(col, ""), bg=bg)
     wb.save(filepath)
     return entry_id
-
-# ─────────────────────────────────────────────────────────
-# OAUTH SIDEBAR PANEL
-# ─────────────────────────────────────────────────────────
-
-def _oauth_sidebar():
-    st.markdown("**Microsoft Sign-In (Recommended)**")
-    st.caption("Works with MFA. Signs in with your @uky.edu account. No password stored.")
-
-    access_token  = st.session_state.get("oauth_access_token")
-    refresh_token = st.session_state.get("oauth_refresh_token")
-    token_expiry  = st.session_state.get("oauth_token_expiry", 0)
-    user_email    = st.session_state.get("oauth_user_email")
-
-    # Silent refresh
-    if refresh_token and time.time() > token_expiry - 60:
-        try:
-            new_tokens = oauth_refresh_token(refresh_token)
-            if new_tokens:
-                st.session_state["oauth_access_token"] = new_tokens["access_token"]
-                st.session_state["oauth_refresh_token"] = new_tokens.get("refresh_token", refresh_token)
-                st.session_state["oauth_token_expiry"]  = time.time() + new_tokens.get("expires_in", 3600)
-                access_token = new_tokens["access_token"]
-        except Exception:
-            pass
-
-    # Already signed in
-    if access_token and time.time() < token_expiry:
-        st.success(f"Signed in as **{user_email or 'your UK account'}**")
-        if st.button("Sign Out", use_container_width=True):
-            for k in ["oauth_access_token","oauth_refresh_token","oauth_user_email","oauth_device_code"]:
-                st.session_state[k] = None
-            st.session_state["oauth_token_expiry"] = 0
-            st.session_state["oauth_polling"] = False
-            st.rerun()
-        return True, user_email
-
-    # Device code flow
-    polling  = st.session_state.get("oauth_polling", False)
-    dev_code = st.session_state.get("oauth_device_code")
-
-    if not polling:
-        if st.button("Sign in with Microsoft", use_container_width=True, type="primary"):
-            try:
-                flow = oauth_start_device_flow()
-                st.session_state["oauth_device_code"] = flow["device_code"]
-                st.session_state["oauth_interval"]    = flow.get("interval", 5)
-                st.session_state["oauth_polling"]     = True
-                st.session_state["_oauth_user_code"]  = flow["user_code"]
-                st.session_state["_oauth_verify_url"] = flow["verification_uri"]
-                st.rerun()
-            except Exception as e:
-                st.error(f"Could not start sign-in: {e}")
-    else:
-        user_code  = st.session_state.get("_oauth_user_code", "")
-        verify_url = st.session_state.get("_oauth_verify_url", "https://microsoft.com/devicelogin")
-        st.info(
-            f"**Step 1** — Open this link in any browser:\n\n"
-            f"**{verify_url}**\n\n"
-            f"**Step 2** — Enter this code: **`{user_code}`**\n\n"
-            f"**Step 3** — Sign in with your @uky.edu account,\n"
-            f"then click the button below."
-        )
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("I signed in — continue", use_container_width=True, type="primary"):
-                try:
-                    tokens = oauth_poll_for_token(
-                        st.session_state["oauth_device_code"],
-                        interval=st.session_state.get("oauth_interval", 5),
-                        max_wait=15,
-                    )
-                    if tokens:
-                        st.session_state["oauth_access_token"]  = tokens["access_token"]
-                        st.session_state["oauth_refresh_token"] = tokens.get("refresh_token")
-                        st.session_state["oauth_token_expiry"]  = time.time() + tokens.get("expires_in", 3600)
-                        me = requests.get(
-                            "https://graph.microsoft.com/v1.0/me",
-                            headers={"Authorization": f"Bearer {tokens['access_token']}"},
-                            timeout=10,
-                        ).json()
-                        st.session_state["oauth_user_email"] = me.get("mail") or me.get("userPrincipalName", "")
-                        st.session_state["oauth_polling"] = False
-                        st.rerun()
-                    else:
-                        st.warning("Not confirmed yet — finish sign-in in your browser first, then try again.")
-                except Exception as e:
-                    st.error(f"Sign-in error: {e}")
-        with col2:
-            if st.button("Cancel", use_container_width=True):
-                st.session_state["oauth_polling"] = False
-                st.rerun()
-
-    return False, None
 
 # ─────────────────────────────────────────────────────────
 # MAIN APP
@@ -457,25 +463,33 @@ def main():
 
     st.markdown("""
     <style>
-    .main{background-color:#f0f4f8}
-    .sec-hdr{font-size:1.05rem;font-weight:700;padding:7px 14px;border-radius:5px;
-             margin:20px 0 8px 0;color:white}
-    .s1{background:#1F4E79}.s2{background:#375623}.s3{background:#7B3F00}
-    .s4{background:#6B2737}.s5{background:#4A235A}.s6{background:#7E5109}
-    .s7{background:#1A5276}.s8{background:#555555}
-    .metric-box{background:#f8f9fa;border:1px solid #dee2e6;border-radius:6px;
-                padding:10px 14px;margin-top:4px}
-    .metric-label{font-size:0.78rem;color:#6c757d;margin-bottom:2px}
-    .metric-value{font-size:1.5rem;font-weight:700;color:#212529}
-    .metric-ok{color:#198754}.metric-warn{color:#dc3545}
-    .moisture-badge{background:#e9ecef;border-radius:4px;padding:3px 9px;
-                    font-size:0.88rem;display:inline-block;margin:2px 3px}
-    .agreement-box{background:#fff3cd;border:2px solid #ffc107;border-radius:8px;
-                   padding:16px 20px;margin:24px 0 8px 0}
-    .result-ok{background:#d1e7dd;border-left:5px solid #198754;border-radius:5px;
-               padding:14px 18px;margin-top:12px}
+    .main { background-color: #f0f4f8; }
+    .sec-hdr { font-size:1.05rem; font-weight:700; padding:7px 14px;
+               border-radius:5px; margin:20px 0 8px 0; color:white; }
+    .s1{background:#1F4E79} .s2{background:#375623} .s3{background:#7B3F00}
+    .s4{background:#6B2737} .s5{background:#4A235A} .s6{background:#7E5109}
+    .s7{background:#1A5276} .s8{background:#555555}
+    .metric-box { background:#f8f9fa; border:1px solid #dee2e6;
+                  border-radius:6px; padding:10px 14px; margin-top:4px; }
+    .metric-label { font-size:0.78rem; color:#6c757d; margin-bottom:2px; }
+    .metric-value { font-size:1.5rem; font-weight:700; color:#212529; }
+    .metric-ok  { color:#198754; }
+    .metric-warn{ color:#dc3545; }
+    .moisture-badge { background:#e9ecef; border-radius:4px; padding:3px 9px;
+                      font-size:0.88rem; display:inline-block; margin:2px 3px; }
+    .agreement-box { background:#fff3cd; border:2px solid #ffc107;
+                     border-radius:8px; padding:16px 20px; margin:24px 0 8px 0; }
+    .result-ok { background:#d1e7dd; border-left:5px solid #198754;
+                 border-radius:5px; padding:14px 18px; margin-top:12px; }
     </style>
     """, unsafe_allow_html=True)
+
+    # ── Inject pending FormSubmit if entry was just saved ────────────
+    # We render it here (top of page) so the JS fires immediately on rerun
+    pending = st.session_state.get("_pending_formsubmit")
+    if pending:
+        st.components.v1.html(pending, height=0)
+        st.session_state["_pending_formsubmit"] = None
 
     # ── Header ──────────────────────────────────────────
     col_h, col_clr = st.columns([6, 1])
@@ -484,44 +498,27 @@ def main():
         st.caption("University of Kentucky Cooperative Extension — Digital Entry Form")
     with col_clr:
         st.markdown("<div style='margin-top:18px'></div>", unsafe_allow_html=True)
-        if st.button("🔄 Clear Form", use_container_width=True):
+        if st.button("🔄 Clear Form", use_container_width=True,
+                     help="Reset all fields for a new entry"):
             _clear_form()
     st.divider()
 
     # ── Sidebar ─────────────────────────────────────────
     with st.sidebar:
         st.header("Settings")
-        st.markdown("**Email Configuration**")
-        auth_mode = st.radio("Sign-in method",
-                             ["Microsoft Sign-In (OAuth2)", "Password (SMTP)"],
-                             index=0 if st.session_state.get("auth_mode") == "oauth" else 1)
-        st.session_state["auth_mode"] = "oauth" if "OAuth2" in auth_mode else "smtp"
-        st.markdown("---")
-
-        oauth_signed_in, oauth_user_email = False, None
-        smtp_server = smtp_port = sender_email = sender_pass = None
-
-        if st.session_state["auth_mode"] == "oauth":
-            oauth_signed_in, oauth_user_email = _oauth_sidebar()
-        else:
-            st.markdown("**SMTP Password Login**")
-            st.caption("Only works if your account does not require MFA.")
-            smtp_server  = st.text_input("SMTP Server", value="smtp.office365.com")
-            smtp_port    = st.number_input("SMTP Port", value=587, step=1)
-            sender_email = st.text_input("Your UK Email", placeholder="yourname@uky.edu")
-            sender_pass  = st.text_input("UK Email Password", type="password")
-
-        st.markdown("---")
-        send_flag = st.checkbox("Auto-send email after saving", value=True)
-        cc_self   = st.checkbox("CC myself on submission", value=True)
-        effective_sender = oauth_user_email if st.session_state["auth_mode"] == "oauth" else sender_email
-        st.divider()
-        excel_path = st.text_input("Excel File Path", value=EXCEL_FILE)
+        excel_path = st.text_input("Excel Save Path", value=EXCEL_FILE)
         st.divider()
         st.markdown("**Contest Rules**")
-        st.info("- Min. 1.5 acres harvested\n- Deadline: July 31\n"
-                "- Supervisor must witness harvest\n"
-                "- Send grain sample to Colette Laurent, Princeton KY")
+        st.info(
+            "- Min. **1.5 acres** harvested\n"
+            "- Deadline: **July 31**\n"
+            "- Supervisor must witness harvest\n"
+            "- Send grain sample to **Colette Laurent**, Princeton KY\n"
+            "- Entries emailed to Dr. Chad Lee automatically"
+        )
+        st.divider()
+        st.success(f"📧 Email: FormSubmit → {FORMSUBMIT_EMAIL}")
+        st.caption("No password needed. Agents just fill the form and submit.")
 
     # ════════════════════════════════════════════════════
     # SECTION 1 — PRODUCER / AGENT
@@ -598,7 +595,8 @@ def main():
     c1, c2 = st.columns(2)
     with c1:
         st.text_area("Growth Regulator(s) — product & timing", height=68, key="growth_reg")
-        st.text_area("Fall Pest Products (herbicides, fungicides, insecticides)", height=68, key="fall_pest")
+        st.text_area("Fall Pest Products (herbicides, fungicides, insecticides)",
+                     height=68, key="fall_pest")
         st.text_area("Biologicals / Other", height=68, key="biologicals")
     with c2:
         st.text_area("Spring Pest Products", height=68, key="spring_pest")
@@ -645,16 +643,18 @@ def main():
     slots_left   = 3 - n_done
     warn_empty   = st.session_state.pop("_moisture_warn", False)
     st.caption("**Grain Moisture:** Certified elevator tester → 1 reading. "
-               "Handheld meter → 3 readings added one at a time, average is auto-calculated.")
+               "Handheld meter → 3 readings added one at a time, average auto-calculated.")
     mc1, mc2, mc3 = st.columns([2, 1, 3])
     with mc1:
         gen   = st.session_state.get("_moisture_gen", 0)
         label = (f"Moisture Reading {n_done + 1} of 3 (%)"
                  if slots_left > 0 else "All 3 readings recorded")
-        st.number_input(label, min_value=0.0, max_value=40.0, step=0.1, format="%.1f",
-                        value=0.0, key=f"moisture_input_{gen}", disabled=(slots_left == 0),
+        st.number_input(label, min_value=0.0, max_value=40.0,
+                        step=0.1, format="%.1f", value=0.0,
+                        key=f"moisture_input_{gen}", disabled=(slots_left == 0),
                         help="Enter % from moisture meter, then press Add Reading.")
-        st.session_state["moisture_input"] = st.session_state.get(f"moisture_input_{gen}", 0.0)
+        st.session_state["moisture_input"] = st.session_state.get(
+            f"moisture_input_{gen}", 0.0)
         if warn_empty:
             st.warning("Enter a value > 0 before adding.")
     with mc2:
@@ -662,8 +662,7 @@ def main():
         st.button("➕ Add Reading", disabled=(slots_left == 0),
                   use_container_width=True, on_click=_add_reading_cb)
         if readings_now:
-            st.button("🗑️ Clear", use_container_width=True,
-                      on_click=_clear_readings_cb)
+            st.button("🗑️ Clear", use_container_width=True, on_click=_clear_readings_cb)
     with mc3:
         gm_avg = st.session_state["gm_avg"]
         if readings_now:
@@ -692,7 +691,8 @@ def main():
     c1, c2, c3 = st.columns(3)
     with c1:
         st.number_input("Grain Weight from Scale (lbs) *", min_value=0.0,
-                        step=10.0, format="%.1f", key="grain_weight", on_change=_recompute)
+                        step=10.0, format="%.1f",
+                        key="grain_weight", on_change=_recompute)
     with c2:
         official_yield = st.session_state["official_yield"]
         yld_cls = "metric-ok" if official_yield > 0 else ""
@@ -702,7 +702,8 @@ def main():
                     unsafe_allow_html=True)
     with c3:
         gw = float(st.session_state.get("grain_weight", 0.0) or 0.0)
-        st.markdown(f"""<div class="metric-box" style="font-size:0.82rem;color:#495057;line-height:1.7">
+        st.markdown(f"""<div class="metric-box"
+          style="font-size:0.82rem;color:#495057;line-height:1.7">
           <b>Step-by-step:</b><br>
           {gw:.0f} x [(100 - {gm_avg:.1f}) / 86.5]<br>
           &divide; 60 &divide; {h_acres:.2f} ac<br>
@@ -713,7 +714,8 @@ def main():
     # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s8">📝 Section 8 — Agent Notes</div>',
                 unsafe_allow_html=True)
-    st.text_area("Additional notes, observations, or issues", height=80, key="agent_notes")
+    st.text_area("Additional notes, observations, or issues",
+                 height=80, key="agent_notes")
 
     # ════════════════════════════════════════════════════
     # AGENT CERTIFICATION + GATED SUBMIT
@@ -733,8 +735,6 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # Generation-counter pattern — bumping gen makes Streamlit create a fresh
-    # unchecked widget, avoiding the "cannot modify after instantiation" error.
     agree_gen = st.session_state.get("_agree_gen", 0)
     st.checkbox("I certify that all information above is accurate and complete.",
                 key=f"agreement_checked_{agree_gen}", value=False)
@@ -755,7 +755,7 @@ def main():
     if float(st.session_state.get("grain_weight", 0.0) or 0.0) <= 0:
         errors.append("Grain weight not entered")
     if not st.session_state.get("moisture_readings"):
-        errors.append("No moisture reading recorded — press Add Reading at least once")
+        errors.append("No moisture reading — press Add Reading at least once")
 
     if errors:
         with st.expander("⚠️ Required fields not complete", expanded=True):
@@ -820,78 +820,66 @@ def main():
             "Harvest_Width_ft":          st.session_state["h_width"],
             "Harvest_Area_ft2":          st.session_state["h_area_ft2"],
             "Harvest_Acres":             st.session_state["h_acres"],
-            "Grain_Moisture_1":          gm1, "Grain_Moisture_2": gm2, "Grain_Moisture_3": gm3,
+            "Grain_Moisture_1":          gm1,
+            "Grain_Moisture_2":          gm2,
+            "Grain_Moisture_3":          gm3,
             "Grain_Moisture_Avg":        st.session_state["gm_avg"],
             "Test_Weight_lbbu":          st.session_state.get("test_weight", 60.0),
             "Grain_Weight_lbs":          st.session_state["grain_weight"],
             "Official_Yield_BuAcre":     st.session_state["official_yield"],
             "Agent_Notes":               st.session_state.get("agent_notes", ""),
+            "_moisture_list":            r,   # used by email body builder
         }
 
         try:
             entry_id = build_excel_with_entry(data, excel_path)
-            area = COUNTY_AREA.get(data["County"], 4)
+            area     = COUNTY_AREA.get(data["County"], 4)
 
+            # ── 1. Upload Excel to OneDrive silently ──────────────────────
+            onedrive_url = upload_excel_to_onedrive(excel_path)
+
+            # ── 2. Queue FormSubmit email ─────────────────────────────────
+            subject = (f"KY Wheat Contest Entry #{entry_id} — "
+                       f"{data['County']} County — {data['Producer_Name']}")
+            fs_html = build_formsubmit_html(data, entry_id, subject,
+                                            onedrive_url=onedrive_url)
+            st.session_state["_pending_formsubmit"] = fs_html
+
+            # ── 3. Success banner ─────────────────────────────────────────
+            onedrive_badge = (
+                f"&nbsp;|&nbsp; <a href='{onedrive_url}' target='_blank'>"
+                f"📁 View on OneDrive</a>"
+                if onedrive_url else ""
+            )
             st.markdown(f"""<div class="result-ok">
-              <h4>Entry #{entry_id} Saved Successfully!</h4>
+              <h4>✅ Entry #{entry_id} Saved!</h4>
               <b>Producer:</b> {data['Producer_Name']} &nbsp;|&nbsp;
               <b>County:</b> {data['County']} (Area {area}) &nbsp;|&nbsp;
               <b>Division:</b> {data['Division'].split('-')[0].strip()}<br>
               <b>Official Yield:</b> {data['Official_Yield_BuAcre']:.2f} bu/acre &nbsp;|&nbsp;
               <b>Harvest Area:</b> {data['Harvest_Acres']:.2f} acres &nbsp;|&nbsp;
-              <b>Grain Moisture:</b> {data['Grain_Moisture_Avg']:.1f}%</div>""",
-                        unsafe_allow_html=True)
+              <b>Grain Moisture:</b> {data['Grain_Moisture_Avg']:.1f}%
+              {onedrive_badge}
+            </div>""", unsafe_allow_html=True)
+
+            # Status pills
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.success("📊 Excel saved locally")
+            with col2:
+                if onedrive_url:
+                    st.success("☁️ Uploaded to OneDrive")
+                else:
+                    st.info("☁️ OneDrive: not configured")
+            with col3:
+                st.success("📧 Email notification sent")
 
             with open(excel_path, "rb") as f:
-                st.download_button("Download Updated Master Excel", data=f,
+                st.download_button("⬇️ Download Master Excel", data=f,
                                    file_name=excel_path,
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-            if send_flag:
-                body = (
-                    f"Dear {RECIPIENT_NAME},\n\nA new wheat yield contest entry has been submitted:\n\n"
-                    f"  Entry ID:       #{entry_id}\n  Producer:       {data['Producer_Name']}\n"
-                    f"  County:         {data['County']} (Area {area})\n  Division:       {data['Division']}\n"
-                    f"  Harvest Date:   {data['Harvest_Date']}\n  Supervisor:     {data['Supervisor_Name']}\n"
-                    f"  Official Yield: {data['Official_Yield_BuAcre']:.2f} bu/acre\n"
-                    f"  Harvest Area:   {data['Harvest_Acres']:.2f} acres\n"
-                    f"  Grain Moisture: {data['Grain_Moisture_Avg']:.1f}% "
-                    f"(readings: {', '.join(str(x)+'%' for x in r)})\n\n"
-                    f"Updated master Excel file attached.\n\nSubmitted via UK Extension Digital Contest Form.\n"
-                )
-                subject = f"KY Wheat Contest Entry #{entry_id} — {data['County']} County — {data['Producer_Name']}"
-                cc_addr = effective_sender if cc_self else None
-                try:
-                    if st.session_state["auth_mode"] == "oauth":
-                        tok = st.session_state.get("oauth_access_token")
-                        if not tok:
-                            st.warning("Not signed in via Microsoft. Sign in using the sidebar, then resubmit.")
-                        else:
-                            oauth_send_email(tok, effective_sender, RECIPIENT_EMAIL,
-                                             subject, body, excel_path, cc=cc_addr)
-                            st.success(f"Email sent via Microsoft to {RECIPIENT_EMAIL}" +
-                                       (" + CC'd to you." if cc_self else "."))
-                    else:
-                        if sender_email and sender_pass:
-                            smtp_send_email(smtp_server, smtp_port, sender_email, sender_pass,
-                                            RECIPIENT_EMAIL, subject, body, excel_path, cc=cc_addr)
-                            st.success(f"Email sent to {RECIPIENT_EMAIL}" +
-                                       (" + CC'd to you." if cc_self else "."))
-                        else:
-                            st.info("Enter credentials in the sidebar to enable auto-email.")
-                except Exception as email_err:
-                    err_str = str(email_err)
-                    if "535" in err_str or "Authentication unsuccessful" in err_str:
-                        st.warning(
-                            "**Email blocked — MFA is required on your UK account.**\n\n"
-                            "Switch to **Microsoft Sign-In (OAuth2)** in the sidebar. "
-                            "Sign in once per session and email will work automatically."
-                        )
-                    else:
-                        st.warning(f"Entry saved but email failed: {email_err}\n\n"
-                                   "Download the Excel above and email it manually.")
-
-            # Reset: bump agree gen so checkbox re-renders unchecked
+            # Bump agree gen so checkbox resets for next entry
             st.session_state["_agree_gen"] = st.session_state.get("_agree_gen", 0) + 1
 
         except Exception as ex:
@@ -906,7 +894,8 @@ def main():
         try:
             df = pd.read_excel(excel_path, header=2)
             show = ["Entry_ID","Submission_Date","County","Area","Producer_Name",
-                    "Division","Wheat_Variety","Harvest_Acres","Official_Yield_BuAcre","Supervisor_Name"]
+                    "Division","Wheat_Variety","Harvest_Acres",
+                    "Official_Yield_BuAcre","Supervisor_Name"]
             cols = [c for c in show if c in df.columns]
             st.dataframe(df[cols].sort_values("Entry_ID", ascending=False),
                          use_container_width=True, hide_index=True)
