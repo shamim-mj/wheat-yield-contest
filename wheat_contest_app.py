@@ -4,6 +4,10 @@ University of Kentucky Cooperative Extension
 
 Storage  : Google Drive (service account — agents need nothing)
 Email    : FormSubmit.co (zero auth, zero password)
+
+FIX: Service accounts have no storage quota.
+     Files must be uploaded to the OWNER's shared folder
+     using parents=[folder_id] + supportsAllDrives=true.
 """
 
 import streamlit as st
@@ -11,17 +15,16 @@ import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-import datetime, requests, json, time, base64, math
+import datetime, requests, json, time, base64
 from pathlib import Path
 
 # ═════════════════════════════════════════════════════════
 #  OWNER CONFIG
 # ═════════════════════════════════════════════════════════
-FORMSUBMIT_EMAIL  = "shamim.one@outlook.com"
-CC_EMAIL          = "mshamim11@uky.edu"
-EXCEL_FILENAME    = "wheat_contest_entries.xlsx"
-EXCEL_FILE        = f"/tmp/{EXCEL_FILENAME}"
-GDRIVE_FOLDER_NAME = "Wheat Contest 2026"   # folder name in your Google Drive
+FORMSUBMIT_EMAIL = "shamim.one@outlook.com"
+CC_EMAIL         = "chad.lee@uky.edu"
+EXCEL_FILENAME   = "wheat_contest_entries.xlsx"
+EXCEL_FILE       = f"/tmp/{EXCEL_FILENAME}"
 # ═════════════════════════════════════════════════════════
 
 KY_COUNTIES = sorted([
@@ -56,14 +59,7 @@ COUNTY_AREA = {
 HEADER_FILL = "2E4057"
 
 # ─────────────────────────────────────────────────────────
-# GOOGLE DRIVE  — pure JWT + requests, no extra library
-# ─────────────────────────────────────────────────────────
-# Streamlit secrets needed:
-#
-#   [gdrive]
-#   folder_id     = "1AbCdEfGhIjKlMnOpQrStUvWxYz"   ← from the folder URL
-#   client_email  = "wheat-contest-uploader@your-project.iam.gserviceaccount.com"
-#   private_key   = "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
+# GOOGLE DRIVE  — service account upload
 # ─────────────────────────────────────────────────────────
 
 def _gdrive_secrets() -> dict:
@@ -73,43 +69,35 @@ def _gdrive_secrets() -> dict:
         return {}
 
 
-def _make_jwt(client_email: str, private_key: str) -> str:
-    """
-    Build a Google OAuth2 JWT manually — no google-auth library needed.
-    Uses RS256 signing via the cryptography package (pre-installed on Streamlit Cloud).
-    """
-    now = int(time.time())
-    header  = {"alg": "RS256", "typ": "JWT"}
-    payload = {
-        "iss":   client_email,
-        "scope": "https://www.googleapis.com/auth/drive.file",
-        "aud":   "https://oauth2.googleapis.com/token",
-        "iat":   now,
-        "exp":   now + 3600,
-    }
-
-    def b64(data: bytes) -> str:
-        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-    h = b64(json.dumps(header).encode())
-    p = b64(json.dumps(payload).encode())
-    msg = f"{h}.{p}".encode()
-
-    # Sign with RS256 using cryptography (available on Streamlit Cloud)
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import padding
-
-    # Handle both escaped and literal newlines in the key
-    key_str = private_key.replace("\\n", "\n")
-    private_key_obj = serialization.load_pem_private_key(key_str.encode(), password=None)
-    signature = private_key_obj.sign(msg, padding.PKCS1v15(), hashes.SHA256())
-    return f"{h}.{p}.{b64(signature)}"
-
-
 def _get_gdrive_token(client_email: str, private_key: str) -> str | None:
-    """Exchange JWT for a Google access token."""
+    """Exchange service account JWT for Google access token."""
     try:
-        jwt = _make_jwt(client_email, private_key)
+        now = int(time.time())
+        header  = {"alg": "RS256", "typ": "JWT"}
+        payload = {
+            "iss":   client_email,
+            "scope": "https://www.googleapis.com/auth/drive.file",
+            "aud":   "https://oauth2.googleapis.com/token",
+            "iat":   now,
+            "exp":   now + 3600,
+        }
+
+        def b64(data: bytes) -> str:
+            return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+        h = b64(json.dumps(header).encode())
+        p = b64(json.dumps(payload).encode())
+        msg = f"{h}.{p}".encode()
+
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+
+        key_str = private_key.replace("\\n", "\n")
+        pk      = serialization.load_pem_private_key(key_str.encode(), password=None)
+        sig     = pk.sign(msg, asym_padding.PKCS1v15(), hashes.SHA256())
+
+        jwt = f"{h}.{p}.{b64(sig)}"
+
         resp = requests.post(
             "https://oauth2.googleapis.com/token",
             data={
@@ -121,44 +109,31 @@ def _get_gdrive_token(client_email: str, private_key: str) -> str | None:
         data = resp.json()
         if "access_token" in data:
             return data["access_token"]
-        st.session_state["_gd_error"] = str(data)
+        st.session_state["_gd_error"] = f"Token error: {data}"
         return None
     except Exception as e:
-        st.session_state["_gd_error"] = str(e)
-        return None
-
-
-def _gdrive_file_id(token: str, folder_id: str, filename: str) -> str | None:
-    """Find existing file in folder so we can update instead of duplicate."""
-    try:
-        resp = requests.get(
-            "https://www.googleapis.com/drive/v3/files",
-            headers={"Authorization": f"Bearer {token}"},
-            params={
-                "q": f"name='{filename}' and '{folder_id}' in parents and trashed=false",
-                "fields": "files(id)",
-            },
-            timeout=10,
-        )
-        files = resp.json().get("files", [])
-        return files[0]["id"] if files else None
-    except Exception:
+        st.session_state["_gd_error"] = f"JWT error: {e}"
         return None
 
 
 def upload_excel_to_gdrive(filepath: str) -> str | None:
     """
-    Upload (or update) the Excel file in the shared Google Drive folder.
-    Returns a shareable web URL or None on failure.
-    Completely silent — agents never know this is happening.
+    Upload Excel to owner's shared Google Drive folder.
+
+    KEY FIX: Service accounts have NO storage quota of their own.
+    Files must be created with parents=[folder_id] so they live in
+    the owner's Drive (inside the shared folder), not the service
+    account's storage. supportsAllDrives=true allows writing to
+    folders shared with the service account.
     """
-    cfg = _gdrive_secrets()
+    cfg          = _gdrive_secrets()
     client_email = cfg.get("client_email", "")
     private_key  = cfg.get("private_key", "")
     folder_id    = cfg.get("folder_id", "")
 
     if not all([client_email, private_key, folder_id]):
-        st.session_state["_gd_error"] = "Missing gdrive secrets (client_email / private_key / folder_id)"
+        st.session_state["_gd_error"] = (
+            "Missing gdrive secrets: need client_email, private_key, folder_id")
         return None
 
     token = _get_gdrive_token(client_email, private_key)
@@ -169,36 +144,65 @@ def upload_excel_to_gdrive(filepath: str) -> str | None:
         with open(filepath, "rb") as f:
             file_bytes = f.read()
 
-        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        mime    = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         headers = {"Authorization": f"Bearer {token}"}
-        existing_id = _gdrive_file_id(token, folder_id, EXCEL_FILENAME)
+
+        # ── Check if file already exists in the folder ──────────────
+        search = requests.get(
+            "https://www.googleapis.com/drive/v3/files",
+            headers=headers,
+            params={
+                "q":     (f"name='{EXCEL_FILENAME}' and "
+                          f"'{folder_id}' in parents and trashed=false"),
+                "fields":                    "files(id)",
+                "supportsAllDrives":         "true",
+                "includeItemsFromAllDrives": "true",
+            },
+            timeout=10,
+        )
+        files       = search.json().get("files", [])
+        existing_id = files[0]["id"] if files else None
 
         if existing_id:
-            # UPDATE existing file (keeps same sharing settings)
+            # ── UPDATE existing file (PATCH content only) ───────────
             resp = requests.patch(
                 f"https://www.googleapis.com/upload/drive/v3/files/{existing_id}",
                 headers={**headers, "Content-Type": mime},
-                params={"uploadType": "media"},
+                params={
+                    "uploadType":        "media",
+                    "supportsAllDrives": "true",
+                },
                 data=file_bytes,
                 timeout=30,
             )
         else:
-            # CREATE new file in the folder
-            metadata = json.dumps({"name": EXCEL_FILENAME, "parents": [folder_id]})
-            boundary = "boundary_wheat_contest"
+            # ── CREATE new file inside owner's shared folder ─────────
+            # parents=[folder_id] → file lives in YOUR Drive, not service account's
+            # supportsAllDrives=true → allows upload to shared folder
+            boundary = "====wheat_contest===="
+            metadata = json.dumps({
+                "name":    EXCEL_FILENAME,
+                "parents": [folder_id],
+            })
             body = (
                 f"--{boundary}\r\n"
                 f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
                 f"{metadata}\r\n"
                 f"--{boundary}\r\n"
                 f"Content-Type: {mime}\r\n\r\n"
-            ).encode() + file_bytes + f"\r\n--{boundary}--".encode()
+            ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--".encode("utf-8")
 
             resp = requests.post(
                 "https://www.googleapis.com/upload/drive/v3/files",
-                headers={**headers,
-                         "Content-Type": f"multipart/related; boundary={boundary}"},
-                params={"uploadType": "multipart", "fields": "id,webViewLink"},
+                headers={
+                    **headers,
+                    "Content-Type": f"multipart/related; boundary={boundary}",
+                },
+                params={
+                    "uploadType":        "multipart",
+                    "fields":            "id,webViewLink",
+                    "supportsAllDrives": "true",
+                },
                 data=body,
                 timeout=30,
             )
@@ -206,7 +210,8 @@ def upload_excel_to_gdrive(filepath: str) -> str | None:
         if resp.status_code in (200, 201):
             file_id = resp.json().get("id", existing_id)
             return f"https://drive.google.com/file/d/{file_id}/view"
-        st.session_state["_gd_error"] = f"HTTP {resp.status_code}: {resp.text[:300]}"
+
+        st.session_state["_gd_error"] = f"HTTP {resp.status_code}: {resp.text[:400]}"
         return None
 
     except Exception as e:
@@ -215,7 +220,7 @@ def upload_excel_to_gdrive(filepath: str) -> str | None:
 
 
 # ─────────────────────────────────────────────────────────
-# FORMSUBMIT  — zero auth email notification
+# FORMSUBMIT
 # ─────────────────────────────────────────────────────────
 
 def build_formsubmit_html(data: dict, entry_id: int,
@@ -310,8 +315,7 @@ def _blank_defaults():
         "agent_notes": "",
         "h_area_ft2": 0.0, "h_acres": 0.0, "gm_avg": 0.0,
         "official_yield": 0.0, "_agree_gen": 0,
-        "_pending_formsubmit": None,
-        "_gd_error": None,
+        "_pending_formsubmit": None, "_gd_error": None,
     }
 
 def _init_state():
@@ -323,10 +327,6 @@ def _clear_form():
     for k, v in _blank_defaults().items():
         st.session_state[k] = v
     st.rerun()
-
-# ─────────────────────────────────────────────────────────
-# RECALCULATION
-# ─────────────────────────────────────────────────────────
 
 def _recompute():
     length = float(st.session_state.get("h_length", 0.0) or 0.0)
@@ -466,10 +466,8 @@ def build_excel_with_entry(data: dict, filepath: str) -> int:
 
 def main():
     _init_state()
-
     st.set_page_config(page_title="KY Wheat Yield Contest", page_icon="🌾",
                        layout="wide", initial_sidebar_state="expanded")
-
     st.markdown("""
     <style>
     .main{background-color:#f0f4f8}
@@ -490,13 +488,13 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    # Fire pending FormSubmit at top of each rerun
+    # Fire pending FormSubmit
     pending = st.session_state.get("_pending_formsubmit")
     if pending:
         st.components.v1.html(pending, height=0)
         st.session_state["_pending_formsubmit"] = None
 
-    # ── Header ──────────────────────────────────────────
+    # Header
     col_h, col_clr = st.columns([6, 1])
     with col_h:
         st.markdown("## 🌾 Kentucky Wheat Yield Contest")
@@ -507,7 +505,7 @@ def main():
             _clear_form()
     st.divider()
 
-    # ── Sidebar ─────────────────────────────────────────
+    # Sidebar
     with st.sidebar:
         st.header("Settings")
         cfg = _gdrive_secrets()
@@ -515,19 +513,13 @@ def main():
             st.success("☁️ Google Drive: configured")
         else:
             st.warning("☁️ Google Drive: secrets missing")
-            st.caption("Add [gdrive] section to Streamlit secrets.")
         st.divider()
         st.markdown("**Contest Rules**")
-        st.info(
-            "- Min. **1.5 acres** harvested\n"
-            "- Deadline: **July 31**\n"
-            "- Supervisor must witness harvest\n"
-            "- Send grain sample to **Colette Laurent**, Princeton KY"
-        )
+        st.info("- Min. **1.5 acres** harvested\n- Deadline: **July 31**\n"
+                "- Supervisor must witness harvest\n"
+                "- Send grain sample to **Colette Laurent**, Princeton KY")
 
-    # ════════════════════════════════════════════════════
-    # SECTION 1 — PRODUCER / AGENT
-    # ════════════════════════════════════════════════════
+    # ── SECTION 1 ──────────────────────────────────────
     st.markdown('<div class="sec-hdr s1">👤 Section 1 — Producer & Agent Information</div>',
                 unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
@@ -543,14 +535,10 @@ def main():
         st.text_input("Mobile", key="producer_mobile")
         st.text_input("Profession / Operation Type", key="profession")
     c1, c2 = st.columns(2)
-    with c1:
-        st.text_input("County Agent / Supervisor Name *", key="supervisor_name")
-    with c2:
-        st.date_input("Supervisor Sign Date", key="supervisor_sig_date")
+    with c1: st.text_input("County Agent / Supervisor Name *", key="supervisor_name")
+    with c2: st.date_input("Supervisor Sign Date", key="supervisor_sig_date")
 
-    # ════════════════════════════════════════════════════
-    # SECTION 2 — AGRONOMIC
-    # ════════════════════════════════════════════════════
+    # ── SECTION 2 ──────────────────────────────────────
     st.markdown('<div class="sec-hdr s2">🌱 Section 2 — Agronomic Data</div>',
                 unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
@@ -567,53 +555,47 @@ def main():
         st.text_input("Row Width (inches)", key="row_width")
         st.text_input("Seeding Rate (seeds/A or lb/A)", key="seeding_rate")
 
-    # ════════════════════════════════════════════════════
-    # SECTION 3 — FERTILIZER
-    # ════════════════════════════════════════════════════
+    # ── SECTION 3 ──────────────────────────────────────
     st.markdown('<div class="sec-hdr s3">🧪 Section 3 — Fertilizer</div>',
                 unsafe_allow_html=True)
     st.caption("Fall Fertilizer (lb/acre)")
-    c1, c2, c3, c4 = st.columns(4)
+    c1,c2,c3,c4 = st.columns(4)
     with c1: st.text_input("N (lb/A)", key="fall_n")
     with c2: st.text_input("P2O5 (lb/A)", key="fall_p")
     with c3: st.text_input("K2O (lb/A)", key="fall_k")
-    with c4: st.text_input("Other fertilizers (type, rate, timing)", key="fall_other")
+    with c4: st.text_input("Other fertilizers", key="fall_other")
     st.caption("Winter/Spring Nitrogen")
-    c1, c2, c3, c4 = st.columns(4)
+    c1,c2,c3,c4 = st.columns(4)
     with c1: st.date_input("Application 1 Date", key="ws_n1_date")
     with c2: st.text_input("N lb/A (App 1)", key="ws_n1_rate")
     with c3: st.date_input("Application 2 Date", key="ws_n2_date")
     with c4: st.text_input("N lb/A (App 2)", key="ws_n2_rate")
     st.caption("Manure")
-    c1, c2, c3, c4 = st.columns(4)
+    c1,c2,c3,c4 = st.columns(4)
     with c1: st.selectbox("Manure (last 18 months)?", ["No","Yes"], key="manure_used")
     manure_on = st.session_state.get("manure_used","No") == "Yes"
     with c2: st.text_input("Type", key="manure_type", disabled=not manure_on)
     with c3: st.text_input("Tons/A", key="manure_tons", disabled=not manure_on)
     with c4: st.date_input("Manure Date", key="manure_date", disabled=not manure_on)
 
-    # ════════════════════════════════════════════════════
-    # SECTION 4 — PEST MANAGEMENT
-    # ════════════════════════════════════════════════════
+    # ── SECTION 4 ──────────────────────────────────────
     st.markdown('<div class="sec-hdr s4">🛡️ Section 4 — Pest Management & Other Inputs</div>',
                 unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     with c1:
-        st.text_area("Growth Regulator(s) — product & timing", height=68, key="growth_reg")
-        st.text_area("Fall Pest Products (herbicides, fungicides, insecticides)", height=68, key="fall_pest")
+        st.text_area("Growth Regulator(s)", height=68, key="growth_reg")
+        st.text_area("Fall Pest Products", height=68, key="fall_pest")
         st.text_area("Biologicals / Other", height=68, key="biologicals")
     with c2:
         st.text_area("Spring Pest Products", height=68, key="spring_pest")
         st.text_area("Heading/Flowering Pest Products", height=68, key="heading_pest")
         st.text_input("Tillage Equipment / Method Used", key="tillage_used")
 
-    # ════════════════════════════════════════════════════
-    # SECTION 5 — HARVEST AREA
-    # ════════════════════════════════════════════════════
+    # ── SECTION 5 ──────────────────────────────────────
     st.markdown('<div class="sec-hdr s5">📐 Section 5 — Harvest Area Measurement</div>',
                 unsafe_allow_html=True)
     st.info("Minimum harvest area: **1.50 acres** (65,340 sq ft).")
-    c1, c2, c3, c4 = st.columns(4)
+    c1,c2,c3,c4 = st.columns(4)
     with c1:
         st.number_input("Length (ft) *", min_value=0.0, step=1.0, format="%.1f",
                         key="h_length", on_change=_recompute)
@@ -628,24 +610,21 @@ def main():
                     f'<div class="metric-value">{h_area_ft2:,.1f}</div></div>',
                     unsafe_allow_html=True)
     with c4:
-        cls   = "metric-ok" if area_ok else "metric-warn"
-        badge = "OK" if area_ok else "Below 1.50 ac min"
-        st.markdown(f'<div class="metric-box"><div class="metric-label">Acres &mdash; {badge}</div>'
+        cls = "metric-ok" if area_ok else "metric-warn"
+        st.markdown(f'<div class="metric-box"><div class="metric-label">Acres — '
+                    f'{"OK" if area_ok else "Below min"}</div>'
                     f'<div class="metric-value {cls}">{h_acres:.2f}</div></div>',
                     unsafe_allow_html=True)
 
-    # ════════════════════════════════════════════════════
-    # SECTION 6 — GRAIN CHARACTERISTICS
-    # ════════════════════════════════════════════════════
+    # ── SECTION 6 ──────────────────────────────────────
     st.markdown('<div class="sec-hdr s6">🌡️ Section 6 — Grain Characteristics</div>',
                 unsafe_allow_html=True)
     readings_now = st.session_state.get("moisture_readings", [])
     n_done       = len(readings_now)
     slots_left   = 3 - n_done
     warn_empty   = st.session_state.pop("_moisture_warn", False)
-    st.caption("**Grain Moisture:** Certified tester → 1 reading. "
-               "Handheld → 3 readings, add one at a time.")
-    mc1, mc2, mc3 = st.columns([2, 1, 3])
+    st.caption("**Grain Moisture:** Certified tester → 1 reading. Handheld → 3 readings.")
+    mc1,mc2,mc3 = st.columns([2,1,3])
     with mc1:
         gen   = st.session_state.get("_moisture_gen", 0)
         label = (f"Moisture Reading {n_done+1} of 3 (%)"
@@ -680,13 +659,11 @@ def main():
     st.number_input("Test Weight (lb/bu)", min_value=0.0, max_value=70.0,
                     step=0.1, format="%.1f", key="test_weight")
 
-    # ════════════════════════════════════════════════════
-    # SECTION 7 — YIELD
-    # ════════════════════════════════════════════════════
+    # ── SECTION 7 ──────────────────────────────────────
     st.markdown('<div class="sec-hdr s7">📊 Section 7 — Yield Calculation</div>',
                 unsafe_allow_html=True)
     st.caption("Formula: lbs x [(100 - %moisture) / 86.5] / 60 lb/bu / acres")
-    c1, c2, c3 = st.columns(3)
+    c1,c2,c3 = st.columns(3)
     with c1:
         st.number_input("Grain Weight from Scale (lbs) *", min_value=0.0,
                         step=10.0, format="%.1f", key="grain_weight", on_change=_recompute)
@@ -699,21 +676,16 @@ def main():
     with c3:
         gw = float(st.session_state.get("grain_weight", 0.0) or 0.0)
         st.markdown(f'<div class="metric-box" style="font-size:0.82rem;color:#495057;line-height:1.7">'
-                    f'<b>Step-by-step:</b><br>'
-                    f'{gw:.0f} x [(100 - {gm_avg:.1f}) / 86.5]<br>'
-                    f'&divide; 60 &divide; {h_acres:.2f} ac<br>'
-                    f'= <b>{official_yield:.2f} bu/ac</b></div>', unsafe_allow_html=True)
+                    f'<b>Step-by-step:</b><br>{gw:.0f} x [(100-{gm_avg:.1f})/86.5]'
+                    f'<br>&divide;60 &divide;{h_acres:.2f}ac'
+                    f'<br>= <b>{official_yield:.2f} bu/ac</b></div>', unsafe_allow_html=True)
 
-    # ════════════════════════════════════════════════════
-    # SECTION 8 — NOTES
-    # ════════════════════════════════════════════════════
+    # ── SECTION 8 ──────────────────────────────────────
     st.markdown('<div class="sec-hdr s8">📝 Section 8 — Agent Notes</div>',
                 unsafe_allow_html=True)
     st.text_area("Additional notes, observations, or issues", height=80, key="agent_notes")
 
-    # ════════════════════════════════════════════════════
-    # CERTIFICATION + SUBMIT
-    # ════════════════════════════════════════════════════
+    # ── CERTIFICATION ───────────────────────────────────
     st.divider()
     st.markdown("""
     <div class="agreement-box">
@@ -764,9 +736,7 @@ def main():
                                disabled=not form_ready, type="primary",
                                use_container_width=True)
 
-    # ════════════════════════════════════════════════════
-    # ON SUBMIT
-    # ════════════════════════════════════════════════════
+    # ── ON SUBMIT ───────────────────────────────────────
     if submit_clicked and form_ready:
         r   = st.session_state.get("moisture_readings", [])
         gm1 = r[0] if len(r) > 0 else ""
@@ -828,7 +798,7 @@ def main():
             entry_id = build_excel_with_entry(data, EXCEL_FILE)
             area     = COUNTY_AREA.get(data["County"], 4)
 
-            # 1. Upload to Google Drive silently
+            # 1. Upload to Google Drive
             st.session_state["_gd_error"] = None
             gdrive_url = upload_excel_to_gdrive(EXCEL_FILE)
 
@@ -838,7 +808,7 @@ def main():
             st.session_state["_pending_formsubmit"] = build_formsubmit_html(
                 data, entry_id, subject, gdrive_url=gdrive_url or "")
 
-            # 3. Success
+            # 3. Success banner
             st.success(f"✅ Entry #{entry_id} saved!")
             st.markdown(
                 f"**Producer:** {data['Producer_Name']} &nbsp;|&nbsp; "
@@ -857,8 +827,8 @@ def main():
                 if gdrive_url:
                     st.success(f"[☁️ View on Google Drive]({gdrive_url})")
                 else:
-                    gd_err = st.session_state.get("_gd_error","")
                     st.warning("☁️ Google Drive failed")
+                    gd_err = st.session_state.get("_gd_error","")
                     if gd_err:
                         with st.expander("Show error detail"):
                             st.code(gd_err)
@@ -876,9 +846,7 @@ def main():
         except Exception as ex:
             st.error(f"Error saving entry: {ex}")
 
-    # ════════════════════════════════════════════════════
-    # ENTRIES TABLE
-    # ════════════════════════════════════════════════════
+    # ── ENTRIES TABLE ───────────────────────────────────
     st.divider()
     st.subheader("📋 Current Season Entries")
     if Path(EXCEL_FILE).exists():
