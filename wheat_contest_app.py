@@ -1,12 +1,6 @@
 """
 Kentucky Wheat Yield Contest - Digital Entry Form
 University of Kentucky Cooperative Extension
-
-Email model: Uses FormSubmit.co — exactly like WheatVision's contact form.
-No password, no SMTP, no OAuth, no authentication of any kind.
-FormSubmit posts the entry data to their server which forwards it to
-the recipient email. One-time email confirmation on FormSubmit is all
-that's needed. Agents never see or touch any email settings.
 """
 
 import streamlit as st
@@ -14,20 +8,18 @@ import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-import datetime, urllib.parse, requests, base64, time, tempfile, os
+import datetime, requests, base64
 from pathlib import Path
 
 # ═════════════════════════════════════════════════════════
-#  OWNER CONFIG — set once, never touched again
+#  OWNER CONFIG
 # ═════════════════════════════════════════════════════════
-# FormSubmit sends to this email. One-time setup:
-#   1. Submit the form once → FormSubmit emails you a confirmation link
-#   2. Click the link → done forever, no account needed
-FORMSUBMIT_EMAIL = "shamim.one@outlook.com"   # receives all entries
-CC_EMAIL         = "chad.lee@uky.edu"         # also CC'd on every entry
-
-EXCEL_FILE        = "wheat_contest_entries.xlsx"
-ONEDRIVE_FOLDER   = "Wheat Contest 2026"   # folder name in your OneDrive root
+FORMSUBMIT_EMAIL = "shamim.one@outlook.com"
+CC_EMAIL         = "mshamim11@uky.edu"
+ONEDRIVE_FOLDER  = "Wheat Contest 2026"
+EXCEL_FILENAME   = "wheat_contest_entries.xlsx"
+EXCEL_FILE       = f"/tmp/{EXCEL_FILENAME}"   # Streamlit Cloud writable path
+GRAPH_BASE       = "https://graph.microsoft.com/v1.0"
 # ═════════════════════════════════════════════════════════
 
 KY_COUNTIES = sorted([
@@ -62,212 +54,142 @@ COUNTY_AREA = {
 HEADER_FILL = "2E4057"
 
 # ─────────────────────────────────────────────────────────
-# FORMSUBMIT HTML FORM  — builds a hidden auto-submit form
+# ONEDRIVE  — app-level auth, no user login needed
 # ─────────────────────────────────────────────────────────
 
-def build_formsubmit_html(data: dict, entry_id: int, subject: str,
-                          onedrive_url: str | None = None) -> str:
-    """
-    Builds a hidden HTML form that auto-submits to FormSubmit.co.
-    FormSubmit forwards the fields as a nicely formatted email.
-    No password, no auth — works from any device/network.
-    """
-    area = COUNTY_AREA.get(data.get("County", ""), 4)
-
-    # Build the email body as a single _message field
-    r = data.get("_moisture_list", [])
-    readings_str = ", ".join(f"{x}%" for x in r) if r else "N/A"
-
-    message = f"""
-KY WHEAT YIELD CONTEST — ENTRY #{entry_id}
-{'='*50}
-
-PRODUCER & AGENT
-  County:         {data.get('County','')} (Area {area})
-  Producer:       {data.get('Producer_Name','')}
-  Address:        {data.get('Producer_Address','')}, {data.get('Producer_Town','')} {data.get('Producer_Zip','')}
-  Phone:          {data.get('Producer_Phone','')} / Mobile: {data.get('Producer_Mobile','')}
-  Profession:     {data.get('Profession','')}
-  Supervisor:     {data.get('Supervisor_Name','')}  (signed {data.get('Supervisor_Signature_Date','')})
-
-AGRONOMIC DATA
-  Division:       {data.get('Division','')}
-  Previous Crop:  {data.get('Previous_Crop','')}
-  Planting Date:  {data.get('Planting_Date','')}
-  Harvest Date:   {data.get('Harvest_Date','')}
-  Wheat Variety:  {data.get('Wheat_Variety','')}
-  Row Width:      {data.get('Row_Width_inches','')} in
-  Seeding Rate:   {data.get('Seeding_Rate','')}
-
-FERTILIZER
-  Fall N/P/K:     {data.get('Fall_N_lbA','0')} / {data.get('Fall_P2O5_lbA','0')} / {data.get('Fall_K2O_lbA','0')} lb/A
-  Fall Other:     {data.get('Fall_Other_Fertilizer','')}
-  Spring N App1:  {data.get('Winter_Spring_N1_lbA','0')} lb/A on {data.get('Winter_Spring_N1_Date','')}
-  Spring N App2:  {data.get('Winter_Spring_N2_lbA','0')} lb/A on {data.get('Winter_Spring_N2_Date','')}
-  Manure:         {data.get('Manure_Used','No')} — {data.get('Manure_Type','')} {data.get('Manure_TonsA','')} T/A
-
-PEST MANAGEMENT
-  Growth Reg:     {data.get('Growth_Regulator','')}
-  Fall Pest:      {data.get('Fall_Pest_Products','')}
-  Spring Pest:    {data.get('Spring_Pest_Products','')}
-  Head/Flower:    {data.get('Heading_Flowering_Pest','')}
-  Biologicals:    {data.get('Biologicals_Other','')}
-  Tillage:        {data.get('Tillage_Used','')}
-
-HARVEST AREA
-  Dimensions:     {data.get('Harvest_Length_ft',0)} ft x {data.get('Harvest_Width_ft',0)} ft
-  Area:           {data.get('Harvest_Area_ft2',0):,.1f} ft² = {data.get('Harvest_Acres',0):.2f} acres
-
-GRAIN CHARACTERISTICS
-  Moisture:       {readings_str}  →  Avg: {data.get('Grain_Moisture_Avg',0):.1f}%
-  Test Weight:    {data.get('Test_Weight_lbbu',60)} lb/bu
-  Grain Weight:   {data.get('Grain_Weight_lbs',0):,.0f} lbs
-
-OFFICIAL YIELD:  {data.get('Official_Yield_BuAcre',0):.2f} bu/acre
-
-AGENT NOTES
-  {data.get('Agent_Notes','None')}
-
-MASTER EXCEL FILE
-  {onedrive_url if onedrive_url else "Download from the app (OneDrive not configured)"}
-
-Submitted: {data.get('Submission_Date','')}
-""".strip()
-
-    # Hidden fields for FormSubmit
-    def hidden(name, value):
-        v = str(value).replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
-        return f'<input type="hidden" name="{name}" value="{v}">'
-
-    fields = "\n".join([
-        hidden("_subject",   subject),
-        hidden("_cc",        CC_EMAIL),
-        hidden("_captcha",   "false"),
-        hidden("_template",  "table"),
-        hidden("Entry_ID",   entry_id),
-        hidden("message",    message),
-    ])
-
-    # Auto-submit via JS immediately after rendering
-    form_html = f"""
-    <form id="fsform"
-          action="https://formsubmit.co/{FORMSUBMIT_EMAIL}"
-          method="POST">
-      {fields}
-      <button type="submit" id="fsbtn"
-              style="display:none">Send</button>
-    </form>
-    <script>
-      // Auto-click after a short delay so Streamlit finishes rendering
-      setTimeout(function(){{
-        document.getElementById('fsbtn').click();
-      }}, 800);
-    </script>
-    """
-    return form_html
-
-# ─────────────────────────────────────────────────────────
-# ONEDRIVE UPLOAD  — uses owner's credentials from Streamlit secrets
-# Agents never see or touch this. Credentials live in Streamlit Cloud's
-# encrypted secrets manager, never in the code.
-#
-# Streamlit secrets needed (set in Streamlit Cloud → App settings → Secrets):
-#
-#   [onedrive]
-#   client_id     = "546960b8-978a-4773-ad35-dcb8a8bd20f2"
-#   tenant_id     = "2b30530b-69b6-4457-b818-481cb53d42be"
-#   client_secret = "YOUR_CLIENT_SECRET_HERE"   ← from Azure app registration
-#
-# The client secret is app-level auth (not user-level) so device enrollment
-# / Conditional Access does NOT apply. This is a server-to-server call.
-# ─────────────────────────────────────────────────────────
-
-GRAPH_BASE = "https://graph.microsoft.com/v1.0"
-
-def _get_app_token() -> str | None:
-    """
-    Get an app-level access token using client credentials flow.
-    This runs on Streamlit's server using YOUR app secret — no user
-    authentication, no device enrollment, no Conditional Access issue.
-    """
+def _od_secrets():
+    """Read OneDrive secrets safely — returns dict or empty dict."""
     try:
-        cfg = st.secrets.get("onedrive", {})
-        client_id     = cfg.get("client_id", "")
-        tenant_id     = cfg.get("tenant_id", "")
-        client_secret = cfg.get("client_secret", "")
-        if not all([client_id, tenant_id, client_secret]):
-            return None
+        return dict(st.secrets.get("onedrive", {}))
+    except Exception:
+        return {}
+
+def _get_app_token():
+    """Client credentials flow — server-to-server, no device enrollment needed."""
+    cfg = _od_secrets()
+    cid = cfg.get("client_id", "")
+    tid = cfg.get("tenant_id", "")
+    sec = cfg.get("client_secret", "")
+    if not all([cid, tid, sec]):
+        return None
+    try:
         resp = requests.post(
-            f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+            f"https://login.microsoftonline.com/{tid}/oauth2/v2.0/token",
             data={
                 "grant_type":    "client_credentials",
-                "client_id":     client_id,
-                "client_secret": client_secret,
+                "client_id":     cid,
+                "client_secret": sec,
                 "scope":         "https://graph.microsoft.com/.default",
             },
-            timeout=10,
+            timeout=15,
         )
-        resp.raise_for_status()
-        return resp.json().get("access_token")
-    except Exception:
+        data = resp.json()
+        if "access_token" in data:
+            return data["access_token"]
+        # Log the error detail to help debug
+        st.session_state["_od_error"] = data.get("error_description", str(data))
+        return None
+    except Exception as e:
+        st.session_state["_od_error"] = str(e)
         return None
 
-
-def _get_owner_drive_id(token: str) -> str | None:
-    """Get the owner's OneDrive drive ID using their email from secrets."""
-    try:
-        owner_email = st.secrets.get("onedrive", {}).get("owner_email", "")
-        if not owner_email:
-            return None
-        resp = requests.get(
-            f"{GRAPH_BASE}/users/{owner_email}/drive",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json().get("id")
-    except Exception:
+def upload_excel_to_onedrive(filepath: str):
+    """
+    Upload Excel to owner's OneDrive using app-level token.
+    Returns web URL string on success, None on failure.
+    """
+    token = _get_app_token()
+    if not token:
         return None
-
-
-def upload_excel_to_onedrive(filepath: str) -> str | None:
-    """
-    Upload the Excel file to the owner's OneDrive folder.
-    Returns the web URL of the file, or None if upload failed.
-    Completely silent — agents never know this is happening.
-    """
+    cfg          = _od_secrets()
+    owner_email  = cfg.get("owner_email", "")
+    if not owner_email:
+        st.session_state["_od_error"] = "owner_email missing from secrets"
+        return None
     try:
-        token = _get_app_token()
-        if not token:
-            return None   # secrets not configured — skip silently
-
-        owner_email = st.secrets.get("onedrive", {}).get("owner_email", "")
-        filename    = Path(filepath).name
-        folder      = ONEDRIVE_FOLDER
-
-        # Upload via simple PUT (works for files up to 4 MB — Excel is tiny)
         with open(filepath, "rb") as f:
             file_bytes = f.read()
-
-        upload_url = (
-            f"{GRAPH_BASE}/users/{owner_email}/drive/root:/"
-            f"{folder}/{filename}:/content"
-        )
+        url = (f"{GRAPH_BASE}/users/{owner_email}/drive/root:/"
+               f"{ONEDRIVE_FOLDER}/{EXCEL_FILENAME}:/content")
         resp = requests.put(
-            upload_url,
+            url,
             headers={
-                "Authorization":  f"Bearer {token}",
-                "Content-Type":   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "Authorization": f"Bearer {token}",
+                "Content-Type":  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             },
             data=file_bytes,
             timeout=30,
         )
         if resp.status_code in (200, 201):
             return resp.json().get("webUrl")
+        st.session_state["_od_error"] = f"Upload HTTP {resp.status_code}: {resp.text[:300]}"
         return None
-    except Exception:
-        return None   # fail silently — FormSubmit email still goes through
+    except Exception as e:
+        st.session_state["_od_error"] = str(e)
+        return None
 
+# ─────────────────────────────────────────────────────────
+# FORMSUBMIT  — zero auth email notification
+# ─────────────────────────────────────────────────────────
+
+def build_formsubmit_html(data: dict, entry_id: int,
+                           subject: str, onedrive_url: str = "") -> str:
+    area = COUNTY_AREA.get(data.get("County", ""), 4)
+    r    = data.get("_moisture_list", [])
+    readings_str = ", ".join(f"{x}%" for x in r) if r else "N/A"
+
+    body = f"""KY WHEAT YIELD CONTEST — ENTRY #{entry_id}
+{'='*50}
+
+PRODUCER & AGENT
+  County:        {data.get('County','')} (Area {area})
+  Producer:      {data.get('Producer_Name','')}
+  Address:       {data.get('Producer_Address','')}, {data.get('Producer_Town','')} {data.get('Producer_Zip','')}
+  Phone:         {data.get('Producer_Phone','')} / Mobile: {data.get('Producer_Mobile','')}
+  Supervisor:    {data.get('Supervisor_Name','')} (signed {data.get('Supervisor_Signature_Date','')})
+
+AGRONOMIC
+  Division:      {data.get('Division','')}
+  Previous Crop: {data.get('Previous_Crop','')}
+  Planting:      {data.get('Planting_Date','')}
+  Harvest:       {data.get('Harvest_Date','')}
+  Variety:       {data.get('Wheat_Variety','')}
+
+HARVEST AREA
+  Dimensions:    {data.get('Harvest_Length_ft',0)} ft x {data.get('Harvest_Width_ft',0)} ft
+  Acres:         {data.get('Harvest_Acres',0):.2f}
+
+GRAIN
+  Moisture:      {readings_str}  →  Avg {data.get('Grain_Moisture_Avg',0):.1f}%
+  Test Weight:   {data.get('Test_Weight_lbbu',60)} lb/bu
+  Grain Weight:  {data.get('Grain_Weight_lbs',0):,.0f} lbs
+
+OFFICIAL YIELD:  {data.get('Official_Yield_BuAcre',0):.2f} bu/acre
+
+MASTER EXCEL: {onedrive_url if onedrive_url else '(download from app)'}
+
+Submitted: {data.get('Submission_Date','')}"""
+
+    def h(name, value):
+        v = str(value).replace('"','&quot;').replace('<','&lt;').replace('>','&gt;')
+        return f'<input type="hidden" name="{name}" value="{v}">'
+
+    fields = "\n".join([
+        h("_subject",  subject),
+        h("_cc",       CC_EMAIL),
+        h("_captcha",  "false"),
+        h("_template", "box"),
+        h("Entry",     f"#{entry_id}"),
+        h("message",   body),
+    ])
+
+    return f"""
+    <form id="fsform" action="https://formsubmit.co/{FORMSUBMIT_EMAIL}" method="POST">
+      {fields}
+      <button type="submit" id="fsbtn" style="display:none">Send</button>
+    </form>
+    <script>setTimeout(function(){{document.getElementById('fsbtn').click();}},800);</script>
+    """
 
 # ─────────────────────────────────────────────────────────
 # SESSION STATE
@@ -300,9 +222,9 @@ def _blank_defaults():
         "test_weight": 60.0, "grain_weight": 0.0,
         "agent_notes": "",
         "h_area_ft2": 0.0, "h_acres": 0.0, "gm_avg": 0.0,
-        "official_yield": 0.0,
-        "_agree_gen": 0,
-        "_pending_formsubmit": None,   # holds HTML to inject after save
+        "official_yield": 0.0, "_agree_gen": 0,
+        "_pending_formsubmit": None,
+        "_od_error": None,
     }
 
 def _init_state():
@@ -316,7 +238,7 @@ def _clear_form():
     st.rerun()
 
 # ─────────────────────────────────────────────────────────
-# LIVE RECALCULATION
+# RECALCULATION
 # ─────────────────────────────────────────────────────────
 
 def _recompute():
@@ -463,29 +385,25 @@ def main():
 
     st.markdown("""
     <style>
-    .main { background-color: #f0f4f8; }
-    .sec-hdr { font-size:1.05rem; font-weight:700; padding:7px 14px;
-               border-radius:5px; margin:20px 0 8px 0; color:white; }
-    .s1{background:#1F4E79} .s2{background:#375623} .s3{background:#7B3F00}
-    .s4{background:#6B2737} .s5{background:#4A235A} .s6{background:#7E5109}
-    .s7{background:#1A5276} .s8{background:#555555}
-    .metric-box { background:#f8f9fa; border:1px solid #dee2e6;
-                  border-radius:6px; padding:10px 14px; margin-top:4px; }
-    .metric-label { font-size:0.78rem; color:#6c757d; margin-bottom:2px; }
-    .metric-value { font-size:1.5rem; font-weight:700; color:#212529; }
-    .metric-ok  { color:#198754; }
-    .metric-warn{ color:#dc3545; }
-    .moisture-badge { background:#e9ecef; border-radius:4px; padding:3px 9px;
-                      font-size:0.88rem; display:inline-block; margin:2px 3px; }
-    .agreement-box { background:#fff3cd; border:2px solid #ffc107;
-                     border-radius:8px; padding:16px 20px; margin:24px 0 8px 0; }
-    .result-ok { background:#d1e7dd; border-left:5px solid #198754;
-                 border-radius:5px; padding:14px 18px; margin-top:12px; }
+    .main{background-color:#f0f4f8}
+    .sec-hdr{font-size:1.05rem;font-weight:700;padding:7px 14px;
+             border-radius:5px;margin:20px 0 8px 0;color:white}
+    .s1{background:#1F4E79}.s2{background:#375623}.s3{background:#7B3F00}
+    .s4{background:#6B2737}.s5{background:#4A235A}.s6{background:#7E5109}
+    .s7{background:#1A5276}.s8{background:#555555}
+    .metric-box{background:#f8f9fa;border:1px solid #dee2e6;
+                border-radius:6px;padding:10px 14px;margin-top:4px}
+    .metric-label{font-size:0.78rem;color:#6c757d;margin-bottom:2px}
+    .metric-value{font-size:1.5rem;font-weight:700;color:#212529}
+    .metric-ok{color:#198754}.metric-warn{color:#dc3545}
+    .moisture-badge{background:#e9ecef;border-radius:4px;padding:3px 9px;
+                    font-size:0.88rem;display:inline-block;margin:2px 3px}
+    .agreement-box{background:#fff3cd;border:2px solid #ffc107;
+                   border-radius:8px;padding:16px 20px;margin:24px 0 8px 0}
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Inject pending FormSubmit if entry was just saved ────────────
-    # We render it here (top of page) so the JS fires immediately on rerun
+    # ── Fire pending FormSubmit at very top of each rerun ────────────
     pending = st.session_state.get("_pending_formsubmit")
     if pending:
         st.components.v1.html(pending, height=0)
@@ -498,27 +416,28 @@ def main():
         st.caption("University of Kentucky Cooperative Extension — Digital Entry Form")
     with col_clr:
         st.markdown("<div style='margin-top:18px'></div>", unsafe_allow_html=True)
-        if st.button("🔄 Clear Form", use_container_width=True,
-                     help="Reset all fields for a new entry"):
+        if st.button("🔄 Clear Form", use_container_width=True):
             _clear_form()
     st.divider()
 
     # ── Sidebar ─────────────────────────────────────────
     with st.sidebar:
         st.header("Settings")
-        excel_path = st.text_input("Excel Save Path", value=EXCEL_FILE)
+        # OneDrive status check
+        cfg = _od_secrets()
+        if all([cfg.get("client_id"), cfg.get("client_secret"), cfg.get("owner_email")]):
+            st.success("☁️ OneDrive: configured")
+        else:
+            st.warning("☁️ OneDrive: secrets missing")
+            st.caption("Add [onedrive] section to Streamlit secrets.")
         st.divider()
         st.markdown("**Contest Rules**")
         st.info(
             "- Min. **1.5 acres** harvested\n"
             "- Deadline: **July 31**\n"
             "- Supervisor must witness harvest\n"
-            "- Send grain sample to **Colette Laurent**, Princeton KY\n"
-            "- Entries emailed to Dr. Chad Lee automatically"
+            "- Send grain sample to **Colette Laurent**, Princeton KY"
         )
-        st.divider()
-        st.success(f"📧 Email: FormSubmit → {FORMSUBMIT_EMAIL}")
-        st.caption("No password needed. Agents just fill the form and submit.")
 
     # ════════════════════════════════════════════════════
     # SECTION 1 — PRODUCER / AGENT
@@ -581,8 +500,8 @@ def main():
     with c4: st.text_input("N lb/A (App 2)", key="ws_n2_rate")
     st.caption("Manure")
     c1, c2, c3, c4 = st.columns(4)
-    with c1: st.selectbox("Manure (last 18 months)?", ["No", "Yes"], key="manure_used")
-    manure_on = st.session_state.get("manure_used", "No") == "Yes"
+    with c1: st.selectbox("Manure (last 18 months)?", ["No","Yes"], key="manure_used")
+    manure_on = st.session_state.get("manure_used","No") == "Yes"
     with c2: st.text_input("Type", key="manure_type", disabled=not manure_on)
     with c3: st.text_input("Tons/A", key="manure_tons", disabled=not manure_on)
     with c4: st.date_input("Manure Date", key="manure_date", disabled=not manure_on)
@@ -595,8 +514,7 @@ def main():
     c1, c2 = st.columns(2)
     with c1:
         st.text_area("Growth Regulator(s) — product & timing", height=68, key="growth_reg")
-        st.text_area("Fall Pest Products (herbicides, fungicides, insecticides)",
-                     height=68, key="fall_pest")
+        st.text_area("Fall Pest Products (herbicides, fungicides, insecticides)", height=68, key="fall_pest")
         st.text_area("Biologicals / Other", height=68, key="biologicals")
     with c2:
         st.text_area("Spring Pest Products", height=68, key="spring_pest")
@@ -608,8 +526,7 @@ def main():
     # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s5">📐 Section 5 — Harvest Area Measurement</div>',
                 unsafe_allow_html=True)
-    st.info("Minimum harvest area: **1.50 acres** (65,340 sq ft). "
-            "Measure each side with tape or measuring wheel.")
+    st.info("Minimum harvest area: **1.50 acres** (65,340 sq ft).")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.number_input("Length (ft) *", min_value=0.0, step=1.0, format="%.1f",
@@ -621,16 +538,14 @@ def main():
     h_acres    = st.session_state["h_acres"]
     area_ok    = h_acres >= 1.50
     with c3:
-        st.markdown(f"""<div class="metric-box">
-          <div class="metric-label">Area (ft²)</div>
-          <div class="metric-value">{h_area_ft2:,.1f}</div></div>""",
+        st.markdown(f'<div class="metric-box"><div class="metric-label">Area (ft²)</div>'
+                    f'<div class="metric-value">{h_area_ft2:,.1f}</div></div>',
                     unsafe_allow_html=True)
     with c4:
-        col_cls = "metric-ok" if area_ok else "metric-warn"
-        badge   = "OK" if area_ok else "Below 1.50 ac min"
-        st.markdown(f"""<div class="metric-box">
-          <div class="metric-label">Acres &mdash; {badge}</div>
-          <div class="metric-value {col_cls}">{h_acres:.2f}</div></div>""",
+        cls   = "metric-ok" if area_ok else "metric-warn"
+        badge = "OK" if area_ok else "Below 1.50 ac min"
+        st.markdown(f'<div class="metric-box"><div class="metric-label">Acres &mdash; {badge}</div>'
+                    f'<div class="metric-value {cls}">{h_acres:.2f}</div></div>',
                     unsafe_allow_html=True)
 
     # ════════════════════════════════════════════════════
@@ -642,24 +557,22 @@ def main():
     n_done       = len(readings_now)
     slots_left   = 3 - n_done
     warn_empty   = st.session_state.pop("_moisture_warn", False)
-    st.caption("**Grain Moisture:** Certified elevator tester → 1 reading. "
-               "Handheld meter → 3 readings added one at a time, average auto-calculated.")
+    st.caption("**Grain Moisture:** Certified tester → 1 reading. "
+               "Handheld → 3 readings, add one at a time.")
     mc1, mc2, mc3 = st.columns([2, 1, 3])
     with mc1:
         gen   = st.session_state.get("_moisture_gen", 0)
-        label = (f"Moisture Reading {n_done + 1} of 3 (%)"
+        label = (f"Moisture Reading {n_done+1} of 3 (%)"
                  if slots_left > 0 else "All 3 readings recorded")
-        st.number_input(label, min_value=0.0, max_value=40.0,
-                        step=0.1, format="%.1f", value=0.0,
-                        key=f"moisture_input_{gen}", disabled=(slots_left == 0),
-                        help="Enter % from moisture meter, then press Add Reading.")
-        st.session_state["moisture_input"] = st.session_state.get(
-            f"moisture_input_{gen}", 0.0)
+        st.number_input(label, min_value=0.0, max_value=40.0, step=0.1,
+                        format="%.1f", value=0.0, key=f"moisture_input_{gen}",
+                        disabled=(slots_left==0))
+        st.session_state["moisture_input"] = st.session_state.get(f"moisture_input_{gen}", 0.0)
         if warn_empty:
             st.warning("Enter a value > 0 before adding.")
     with mc2:
         st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        st.button("➕ Add Reading", disabled=(slots_left == 0),
+        st.button("➕ Add Reading", disabled=(slots_left==0),
                   use_container_width=True, on_click=_add_reading_cb)
         if readings_now:
             st.button("🗑️ Clear", use_container_width=True, on_click=_clear_readings_cb)
@@ -669,21 +582,20 @@ def main():
             badges = " ".join(
                 f'<span class="moisture-badge">#{i+1}: <b>{r}%</b></span>'
                 for i, r in enumerate(readings_now))
-            st.markdown(f"""<div class="metric-box">
-              <div class="metric-label">Recorded readings &nbsp; {badges}</div>
-              <div class="metric-value metric-ok">Avg: {gm_avg:.1f}%</div></div>""",
+            st.markdown(f'<div class="metric-box"><div class="metric-label">'
+                        f'Recorded readings &nbsp; {badges}</div>'
+                        f'<div class="metric-value metric-ok">Avg: {gm_avg:.1f}%</div></div>',
                         unsafe_allow_html=True)
         else:
-            st.markdown("""<div class="metric-box">
-              <div class="metric-label">Recorded readings</div>
-              <div class="metric-value" style="color:#adb5bd;font-size:1rem">
-                None yet &mdash; add up to 3</div></div>""", unsafe_allow_html=True)
+            st.markdown('<div class="metric-box"><div class="metric-label">Recorded readings</div>'
+                        '<div class="metric-value" style="color:#adb5bd;font-size:1rem">'
+                        'None yet &mdash; add up to 3</div></div>', unsafe_allow_html=True)
     st.markdown("")
     st.number_input("Test Weight (lb/bu)", min_value=0.0, max_value=70.0,
                     step=0.1, format="%.1f", key="test_weight")
 
     # ════════════════════════════════════════════════════
-    # SECTION 7 — YIELD CALCULATION
+    # SECTION 7 — YIELD
     # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s7">📊 Section 7 — Yield Calculation</div>',
                 unsafe_allow_html=True)
@@ -691,34 +603,30 @@ def main():
     c1, c2, c3 = st.columns(3)
     with c1:
         st.number_input("Grain Weight from Scale (lbs) *", min_value=0.0,
-                        step=10.0, format="%.1f",
-                        key="grain_weight", on_change=_recompute)
+                        step=10.0, format="%.1f", key="grain_weight", on_change=_recompute)
     with c2:
         official_yield = st.session_state["official_yield"]
         yld_cls = "metric-ok" if official_yield > 0 else ""
-        st.markdown(f"""<div class="metric-box">
-          <div class="metric-label">Official Yield (Bu/Acre)</div>
-          <div class="metric-value {yld_cls}">{official_yield:.2f}</div></div>""",
+        st.markdown(f'<div class="metric-box"><div class="metric-label">Official Yield (Bu/Acre)</div>'
+                    f'<div class="metric-value {yld_cls}">{official_yield:.2f}</div></div>',
                     unsafe_allow_html=True)
     with c3:
         gw = float(st.session_state.get("grain_weight", 0.0) or 0.0)
-        st.markdown(f"""<div class="metric-box"
-          style="font-size:0.82rem;color:#495057;line-height:1.7">
-          <b>Step-by-step:</b><br>
-          {gw:.0f} x [(100 - {gm_avg:.1f}) / 86.5]<br>
-          &divide; 60 &divide; {h_acres:.2f} ac<br>
-          = <b>{official_yield:.2f} bu/ac</b></div>""", unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-box" style="font-size:0.82rem;color:#495057;line-height:1.7">'
+                    f'<b>Step-by-step:</b><br>'
+                    f'{gw:.0f} x [(100 - {gm_avg:.1f}) / 86.5]<br>'
+                    f'&divide; 60 &divide; {h_acres:.2f} ac<br>'
+                    f'= <b>{official_yield:.2f} bu/ac</b></div>', unsafe_allow_html=True)
 
     # ════════════════════════════════════════════════════
     # SECTION 8 — NOTES
     # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s8">📝 Section 8 — Agent Notes</div>',
                 unsafe_allow_html=True)
-    st.text_area("Additional notes, observations, or issues",
-                 height=80, key="agent_notes")
+    st.text_area("Additional notes, observations, or issues", height=80, key="agent_notes")
 
     # ════════════════════════════════════════════════════
-    # AGENT CERTIFICATION + GATED SUBMIT
+    # CERTIFICATION + SUBMIT
     # ════════════════════════════════════════════════════
     st.divider()
     st.markdown("""
@@ -726,7 +634,7 @@ def main():
     <b>📋 Agent Certification — Required Before Submission</b><br>
     By checking the box below, you certify that:
     <ul style="margin:8px 0 4px 20px;">
-      <li>All information entered is <b>accurate and complete</b> to the best of your knowledge.</li>
+      <li>All information entered is <b>accurate and complete</b>.</li>
       <li>The harvest area was <b>physically measured</b> and meets the 1.50-acre minimum.</li>
       <li>Grain moisture and weight were recorded using <b>certified or approved equipment</b>.</li>
       <li>You witnessed or verified the harvest as the <b>supervising county agent</b>.</li>
@@ -740,19 +648,18 @@ def main():
                 key=f"agreement_checked_{agree_gen}", value=False)
     agreement = st.session_state.get(f"agreement_checked_{agree_gen}", False)
 
-    # ── Validation ──
     errors = []
-    if st.session_state.get("county", "— Select —") == "— Select —":
+    if st.session_state.get("county","— Select —") == "— Select —":
         errors.append("County not selected")
-    if not st.session_state.get("producer_name", "").strip():
+    if not st.session_state.get("producer_name","").strip():
         errors.append("Producer name missing")
-    if not st.session_state.get("supervisor_name", "").strip():
+    if not st.session_state.get("supervisor_name","").strip():
         errors.append("Supervisor name missing")
-    if not st.session_state.get("wheat_variety", "").strip():
+    if not st.session_state.get("wheat_variety","").strip():
         errors.append("Wheat variety missing")
     if st.session_state["h_acres"] < 1.50:
         errors.append(f"Harvest area {st.session_state['h_acres']:.2f} ac < 1.50 ac minimum")
-    if float(st.session_state.get("grain_weight", 0.0) or 0.0) <= 0:
+    if float(st.session_state.get("grain_weight",0.0) or 0.0) <= 0:
         errors.append("Grain weight not entered")
     if not st.session_state.get("moisture_readings"):
         errors.append("No moisture reading — press Add Reading at least once")
@@ -783,39 +690,39 @@ def main():
         data = {
             "County":                    st.session_state["county"],
             "Producer_Name":             st.session_state["producer_name"],
-            "Producer_Address":          st.session_state.get("producer_address", ""),
-            "Producer_Town":             st.session_state.get("producer_town", ""),
-            "Producer_Zip":              st.session_state.get("producer_zip", ""),
-            "Producer_Phone":            st.session_state.get("producer_phone", ""),
-            "Producer_Mobile":           st.session_state.get("producer_mobile", ""),
-            "Profession":                st.session_state.get("profession", ""),
-            "Harvest_Date":              str(st.session_state.get("harvest_date", "")),
+            "Producer_Address":          st.session_state.get("producer_address",""),
+            "Producer_Town":             st.session_state.get("producer_town",""),
+            "Producer_Zip":              st.session_state.get("producer_zip",""),
+            "Producer_Phone":            st.session_state.get("producer_phone",""),
+            "Producer_Mobile":           st.session_state.get("producer_mobile",""),
+            "Profession":                st.session_state.get("profession",""),
+            "Harvest_Date":              str(st.session_state.get("harvest_date","")),
             "Supervisor_Name":           st.session_state["supervisor_name"],
-            "Supervisor_Signature_Date": str(st.session_state.get("supervisor_sig_date", "")),
-            "Division":                  st.session_state.get("division", ""),
-            "Previous_Crop":             st.session_state.get("previous_crop", ""),
-            "Planting_Date":             str(st.session_state.get("planting_date", "")),
+            "Supervisor_Signature_Date": str(st.session_state.get("supervisor_sig_date","")),
+            "Division":                  st.session_state.get("division",""),
+            "Previous_Crop":             st.session_state.get("previous_crop",""),
+            "Planting_Date":             str(st.session_state.get("planting_date","")),
             "Wheat_Variety":             st.session_state["wheat_variety"],
-            "Row_Width_inches":          st.session_state.get("row_width", ""),
-            "Seeding_Rate":              st.session_state.get("seeding_rate", ""),
-            "Fall_N_lbA":                st.session_state.get("fall_n", "0"),
-            "Fall_P2O5_lbA":             st.session_state.get("fall_p", "0"),
-            "Fall_K2O_lbA":              st.session_state.get("fall_k", "0"),
-            "Fall_Other_Fertilizer":     st.session_state.get("fall_other", ""),
-            "Winter_Spring_N1_Date":     str(st.session_state.get("ws_n1_date", "")),
-            "Winter_Spring_N1_lbA":      st.session_state.get("ws_n1_rate", "0"),
-            "Winter_Spring_N2_Date":     str(st.session_state.get("ws_n2_date", "")),
-            "Winter_Spring_N2_lbA":      st.session_state.get("ws_n2_rate", "0"),
-            "Manure_Used":               st.session_state.get("manure_used", "No"),
-            "Manure_Type":               st.session_state.get("manure_type", "") if manure_on else "",
-            "Manure_TonsA":              st.session_state.get("manure_tons", "") if manure_on else "",
-            "Manure_Date":               str(st.session_state.get("manure_date", "")) if manure_on else "",
-            "Growth_Regulator":          st.session_state.get("growth_reg", ""),
-            "Fall_Pest_Products":        st.session_state.get("fall_pest", ""),
-            "Spring_Pest_Products":      st.session_state.get("spring_pest", ""),
-            "Heading_Flowering_Pest":    st.session_state.get("heading_pest", ""),
-            "Biologicals_Other":         st.session_state.get("biologicals", ""),
-            "Tillage_Used":              st.session_state.get("tillage_used", ""),
+            "Row_Width_inches":          st.session_state.get("row_width",""),
+            "Seeding_Rate":              st.session_state.get("seeding_rate",""),
+            "Fall_N_lbA":                st.session_state.get("fall_n","0"),
+            "Fall_P2O5_lbA":             st.session_state.get("fall_p","0"),
+            "Fall_K2O_lbA":              st.session_state.get("fall_k","0"),
+            "Fall_Other_Fertilizer":     st.session_state.get("fall_other",""),
+            "Winter_Spring_N1_Date":     str(st.session_state.get("ws_n1_date","")),
+            "Winter_Spring_N1_lbA":      st.session_state.get("ws_n1_rate","0"),
+            "Winter_Spring_N2_Date":     str(st.session_state.get("ws_n2_date","")),
+            "Winter_Spring_N2_lbA":      st.session_state.get("ws_n2_rate","0"),
+            "Manure_Used":               st.session_state.get("manure_used","No"),
+            "Manure_Type":               st.session_state.get("manure_type","") if manure_on else "",
+            "Manure_TonsA":              st.session_state.get("manure_tons","") if manure_on else "",
+            "Manure_Date":               str(st.session_state.get("manure_date","")) if manure_on else "",
+            "Growth_Regulator":          st.session_state.get("growth_reg",""),
+            "Fall_Pest_Products":        st.session_state.get("fall_pest",""),
+            "Spring_Pest_Products":      st.session_state.get("spring_pest",""),
+            "Heading_Flowering_Pest":    st.session_state.get("heading_pest",""),
+            "Biologicals_Other":         st.session_state.get("biologicals",""),
+            "Tillage_Used":              st.session_state.get("tillage_used",""),
             "Harvest_Length_ft":         st.session_state["h_length"],
             "Harvest_Width_ft":          st.session_state["h_width"],
             "Harvest_Area_ft2":          st.session_state["h_area_ft2"],
@@ -824,82 +731,87 @@ def main():
             "Grain_Moisture_2":          gm2,
             "Grain_Moisture_3":          gm3,
             "Grain_Moisture_Avg":        st.session_state["gm_avg"],
-            "Test_Weight_lbbu":          st.session_state.get("test_weight", 60.0),
+            "Test_Weight_lbbu":          st.session_state.get("test_weight",60.0),
             "Grain_Weight_lbs":          st.session_state["grain_weight"],
             "Official_Yield_BuAcre":     st.session_state["official_yield"],
-            "Agent_Notes":               st.session_state.get("agent_notes", ""),
-            "_moisture_list":            r,   # used by email body builder
+            "Agent_Notes":               st.session_state.get("agent_notes",""),
+            "_moisture_list":            r,
         }
 
         try:
-            entry_id = build_excel_with_entry(data, excel_path)
+            entry_id = build_excel_with_entry(data, EXCEL_FILE)
             area     = COUNTY_AREA.get(data["County"], 4)
 
-            # ── 1. Upload Excel to OneDrive silently ──────────────────────
-            onedrive_url = upload_excel_to_onedrive(excel_path)
+            # 1. Upload to OneDrive
+            st.session_state["_od_error"] = None
+            onedrive_url = upload_excel_to_onedrive(EXCEL_FILE)
 
-            # ── 2. Queue FormSubmit email ─────────────────────────────────
+            # 2. Queue FormSubmit email
             subject = (f"KY Wheat Contest Entry #{entry_id} — "
                        f"{data['County']} County — {data['Producer_Name']}")
-            fs_html = build_formsubmit_html(data, entry_id, subject,
-                                            onedrive_url=onedrive_url)
-            st.session_state["_pending_formsubmit"] = fs_html
+            st.session_state["_pending_formsubmit"] = build_formsubmit_html(
+                data, entry_id, subject, onedrive_url=onedrive_url or "")
 
-            # ── 3. Success banner ─────────────────────────────────────────
-            onedrive_badge = (
-                f"&nbsp;|&nbsp; <a href='{onedrive_url}' target='_blank'>"
-                f"📁 View on OneDrive</a>"
-                if onedrive_url else ""
+            # 3. Success banner — pure st.* widgets, no raw HTML concat
+            st.success(f"✅ Entry #{entry_id} saved!")
+            st.markdown(
+                f"**Producer:** {data['Producer_Name']} &nbsp;|&nbsp; "
+                f"**County:** {data['County']} (Area {area}) &nbsp;|&nbsp; "
+                f"**Division:** {data['Division'].split('-')[0].strip()}  \n"
+                f"**Official Yield:** {data['Official_Yield_BuAcre']:.2f} bu/acre &nbsp;|&nbsp; "
+                f"**Harvest Area:** {data['Harvest_Acres']:.2f} acres &nbsp;|&nbsp; "
+                f"**Grain Moisture:** {data['Grain_Moisture_Avg']:.1f}%"
             )
-            st.markdown(f"""<div class="result-ok">
-              <h4>✅ Entry #{entry_id} Saved!</h4>
-              <b>Producer:</b> {data['Producer_Name']} &nbsp;|&nbsp;
-              <b>County:</b> {data['County']} (Area {area}) &nbsp;|&nbsp;
-              <b>Division:</b> {data['Division'].split('-')[0].strip()}<br>
-              <b>Official Yield:</b> {data['Official_Yield_BuAcre']:.2f} bu/acre &nbsp;|&nbsp;
-              <b>Harvest Area:</b> {data['Harvest_Acres']:.2f} acres &nbsp;|&nbsp;
-              <b>Grain Moisture:</b> {data['Grain_Moisture_Avg']:.1f}%
-              {onedrive_badge}
-            </div>""", unsafe_allow_html=True)
 
-            # Status pills
+            # 4. Status pills
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.success("📊 Excel saved locally")
+                st.success("📊 Excel saved")
             with col2:
                 if onedrive_url:
-                    st.success("☁️ Uploaded to OneDrive")
+                    st.success(f"[☁️ View on OneDrive]({onedrive_url})")
                 else:
-                    st.info("☁️ OneDrive: not configured")
+                    od_err = st.session_state.get("_od_error","")
+                    st.warning(f"☁️ OneDrive failed")
+                    if od_err:
+                        with st.expander("Show error detail"):
+                            st.code(od_err)
             with col3:
                 st.success("📧 Email notification sent")
 
-            with open(excel_path, "rb") as f:
+            # 5. Download button
+            with open(EXCEL_FILE, "rb") as f:
                 st.download_button("⬇️ Download Master Excel", data=f,
-                                   file_name=excel_path,
+                                   file_name=EXCEL_FILENAME,
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-            # Bump agree gen so checkbox resets for next entry
+            # Reset agreement for next entry
             st.session_state["_agree_gen"] = st.session_state.get("_agree_gen", 0) + 1
 
         except Exception as ex:
             st.error(f"Error saving entry: {ex}")
 
     # ════════════════════════════════════════════════════
-    # ENTRIES TABLE
+    # ENTRIES TABLE — FIX: skip the 2 decorative header rows
     # ════════════════════════════════════════════════════
     st.divider()
     st.subheader("📋 Current Season Entries")
-    if Path(excel_path).exists():
+    if Path(EXCEL_FILE).exists():
         try:
-            df = pd.read_excel(excel_path, header=2)
+            # Row 1 = title banner, Row 2 = section colors, Row 3 = column headers
+            df = pd.read_excel(EXCEL_FILE, header=2)   # 0-indexed → row 3
+            # Drop any completely empty rows
+            df = df.dropna(how="all")
             show = ["Entry_ID","Submission_Date","County","Area","Producer_Name",
                     "Division","Wheat_Variety","Harvest_Acres",
                     "Official_Yield_BuAcre","Supervisor_Name"]
             cols = [c for c in show if c in df.columns]
-            st.dataframe(df[cols].sort_values("Entry_ID", ascending=False),
-                         use_container_width=True, hide_index=True)
-            st.caption(f"Total entries: **{len(df)}**")
+            if len(df) > 0:
+                st.dataframe(df[cols].sort_values("Entry_ID", ascending=False),
+                             use_container_width=True, hide_index=True)
+                st.caption(f"Total entries: **{len(df)}**")
+            else:
+                st.info("No entries submitted yet.")
         except Exception as e:
             st.info(f"No entries yet: {e}")
     else:
