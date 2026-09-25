@@ -1,6 +1,9 @@
 """
 Kentucky Wheat Yield Contest - Digital Entry Form
 University of Kentucky Cooperative Extension
+
+Storage  : Google Drive (service account — agents need nothing)
+Email    : FormSubmit.co (zero auth, zero password)
 """
 
 import streamlit as st
@@ -8,18 +11,17 @@ import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-import datetime, requests, base64
+import datetime, requests, json, time, base64, math
 from pathlib import Path
 
 # ═════════════════════════════════════════════════════════
 #  OWNER CONFIG
 # ═════════════════════════════════════════════════════════
-FORMSUBMIT_EMAIL = "shamim.one@outlook.com"
-CC_EMAIL         = "mshamim11@uky.edu"
-ONEDRIVE_FOLDER  = "Wheat Contest 2026"
-EXCEL_FILENAME   = "wheat_contest_entries.xlsx"
-EXCEL_FILE       = f"/tmp/{EXCEL_FILENAME}"   # Streamlit Cloud writable path
-GRAPH_BASE       = "https://graph.microsoft.com/v1.0"
+FORMSUBMIT_EMAIL  = "shamim.one@outlook.com"
+CC_EMAIL          = "mshamim11@uky.edu"
+EXCEL_FILENAME    = "wheat_contest_entries.xlsx"
+EXCEL_FILE        = f"/tmp/{EXCEL_FILENAME}"
+GDRIVE_FOLDER_NAME = "Wheat Contest 2026"   # folder name in your Google Drive
 # ═════════════════════════════════════════════════════════
 
 KY_COUNTIES = sorted([
@@ -54,86 +56,170 @@ COUNTY_AREA = {
 HEADER_FILL = "2E4057"
 
 # ─────────────────────────────────────────────────────────
-# ONEDRIVE  — app-level auth, no user login needed
+# GOOGLE DRIVE  — pure JWT + requests, no extra library
+# ─────────────────────────────────────────────────────────
+# Streamlit secrets needed:
+#
+#   [gdrive]
+#   folder_id     = "1AbCdEfGhIjKlMnOpQrStUvWxYz"   ← from the folder URL
+#   client_email  = "wheat-contest-uploader@your-project.iam.gserviceaccount.com"
+#   private_key   = "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
 # ─────────────────────────────────────────────────────────
 
-def _od_secrets():
-    """Read OneDrive secrets safely — returns dict or empty dict."""
+def _gdrive_secrets() -> dict:
     try:
-        return dict(st.secrets.get("onedrive", {}))
+        return dict(st.secrets.get("gdrive", {}))
     except Exception:
         return {}
 
-def _get_app_token():
-    """Client credentials flow — server-to-server, no device enrollment needed."""
-    cfg = _od_secrets()
-    cid = cfg.get("client_id", "")
-    tid = cfg.get("tenant_id", "")
-    sec = cfg.get("client_secret", "")
-    if not all([cid, tid, sec]):
-        return None
+
+def _make_jwt(client_email: str, private_key: str) -> str:
+    """
+    Build a Google OAuth2 JWT manually — no google-auth library needed.
+    Uses RS256 signing via the cryptography package (pre-installed on Streamlit Cloud).
+    """
+    now = int(time.time())
+    header  = {"alg": "RS256", "typ": "JWT"}
+    payload = {
+        "iss":   client_email,
+        "scope": "https://www.googleapis.com/auth/drive.file",
+        "aud":   "https://oauth2.googleapis.com/token",
+        "iat":   now,
+        "exp":   now + 3600,
+    }
+
+    def b64(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    h = b64(json.dumps(header).encode())
+    p = b64(json.dumps(payload).encode())
+    msg = f"{h}.{p}".encode()
+
+    # Sign with RS256 using cryptography (available on Streamlit Cloud)
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    # Handle both escaped and literal newlines in the key
+    key_str = private_key.replace("\\n", "\n")
+    private_key_obj = serialization.load_pem_private_key(key_str.encode(), password=None)
+    signature = private_key_obj.sign(msg, padding.PKCS1v15(), hashes.SHA256())
+    return f"{h}.{p}.{b64(signature)}"
+
+
+def _get_gdrive_token(client_email: str, private_key: str) -> str | None:
+    """Exchange JWT for a Google access token."""
     try:
+        jwt = _make_jwt(client_email, private_key)
         resp = requests.post(
-            f"https://login.microsoftonline.com/{tid}/oauth2/v2.0/token",
+            "https://oauth2.googleapis.com/token",
             data={
-                "grant_type":    "client_credentials",
-                "client_id":     cid,
-                "client_secret": sec,
-                "scope":         "https://graph.microsoft.com/.default",
+                "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                "assertion":  jwt,
             },
             timeout=15,
         )
         data = resp.json()
         if "access_token" in data:
             return data["access_token"]
-        # Log the error detail to help debug
-        st.session_state["_od_error"] = data.get("error_description", str(data))
+        st.session_state["_gd_error"] = str(data)
         return None
     except Exception as e:
-        st.session_state["_od_error"] = str(e)
+        st.session_state["_gd_error"] = str(e)
         return None
 
-def upload_excel_to_onedrive(filepath: str):
+
+def _gdrive_file_id(token: str, folder_id: str, filename: str) -> str | None:
+    """Find existing file in folder so we can update instead of duplicate."""
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/drive/v3/files",
+            headers={"Authorization": f"Bearer {token}"},
+            params={
+                "q": f"name='{filename}' and '{folder_id}' in parents and trashed=false",
+                "fields": "files(id)",
+            },
+            timeout=10,
+        )
+        files = resp.json().get("files", [])
+        return files[0]["id"] if files else None
+    except Exception:
+        return None
+
+
+def upload_excel_to_gdrive(filepath: str) -> str | None:
     """
-    Upload Excel to owner's OneDrive using app-level token.
-    Returns web URL string on success, None on failure.
+    Upload (or update) the Excel file in the shared Google Drive folder.
+    Returns a shareable web URL or None on failure.
+    Completely silent — agents never know this is happening.
     """
-    token = _get_app_token()
+    cfg = _gdrive_secrets()
+    client_email = cfg.get("client_email", "")
+    private_key  = cfg.get("private_key", "")
+    folder_id    = cfg.get("folder_id", "")
+
+    if not all([client_email, private_key, folder_id]):
+        st.session_state["_gd_error"] = "Missing gdrive secrets (client_email / private_key / folder_id)"
+        return None
+
+    token = _get_gdrive_token(client_email, private_key)
     if not token:
         return None
-    cfg          = _od_secrets()
-    owner_email  = cfg.get("owner_email", "")
-    if not owner_email:
-        st.session_state["_od_error"] = "owner_email missing from secrets"
-        return None
+
     try:
         with open(filepath, "rb") as f:
             file_bytes = f.read()
-        url = (f"{GRAPH_BASE}/users/{owner_email}/drive/root:/"
-               f"{ONEDRIVE_FOLDER}/{EXCEL_FILENAME}:/content")
-        resp = requests.put(
-            url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type":  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            },
-            data=file_bytes,
-            timeout=30,
-        )
+
+        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        headers = {"Authorization": f"Bearer {token}"}
+        existing_id = _gdrive_file_id(token, folder_id, EXCEL_FILENAME)
+
+        if existing_id:
+            # UPDATE existing file (keeps same sharing settings)
+            resp = requests.patch(
+                f"https://www.googleapis.com/upload/drive/v3/files/{existing_id}",
+                headers={**headers, "Content-Type": mime},
+                params={"uploadType": "media"},
+                data=file_bytes,
+                timeout=30,
+            )
+        else:
+            # CREATE new file in the folder
+            metadata = json.dumps({"name": EXCEL_FILENAME, "parents": [folder_id]})
+            boundary = "boundary_wheat_contest"
+            body = (
+                f"--{boundary}\r\n"
+                f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+                f"{metadata}\r\n"
+                f"--{boundary}\r\n"
+                f"Content-Type: {mime}\r\n\r\n"
+            ).encode() + file_bytes + f"\r\n--{boundary}--".encode()
+
+            resp = requests.post(
+                "https://www.googleapis.com/upload/drive/v3/files",
+                headers={**headers,
+                         "Content-Type": f"multipart/related; boundary={boundary}"},
+                params={"uploadType": "multipart", "fields": "id,webViewLink"},
+                data=body,
+                timeout=30,
+            )
+
         if resp.status_code in (200, 201):
-            return resp.json().get("webUrl")
-        st.session_state["_od_error"] = f"Upload HTTP {resp.status_code}: {resp.text[:300]}"
+            file_id = resp.json().get("id", existing_id)
+            return f"https://drive.google.com/file/d/{file_id}/view"
+        st.session_state["_gd_error"] = f"HTTP {resp.status_code}: {resp.text[:300]}"
         return None
+
     except Exception as e:
-        st.session_state["_od_error"] = str(e)
+        st.session_state["_gd_error"] = str(e)
         return None
+
 
 # ─────────────────────────────────────────────────────────
 # FORMSUBMIT  — zero auth email notification
 # ─────────────────────────────────────────────────────────
 
 def build_formsubmit_html(data: dict, entry_id: int,
-                           subject: str, onedrive_url: str = "") -> str:
+                           subject: str, gdrive_url: str = "") -> str:
     area = COUNTY_AREA.get(data.get("County", ""), 4)
     r    = data.get("_moisture_list", [])
     readings_str = ", ".join(f"{x}%" for x in r) if r else "N/A"
@@ -166,7 +252,7 @@ GRAIN
 
 OFFICIAL YIELD:  {data.get('Official_Yield_BuAcre',0):.2f} bu/acre
 
-MASTER EXCEL: {onedrive_url if onedrive_url else '(download from app)'}
+MASTER EXCEL:    {gdrive_url if gdrive_url else '(download from app)'}
 
 Submitted: {data.get('Submission_Date','')}"""
 
@@ -190,6 +276,7 @@ Submitted: {data.get('Submission_Date','')}"""
     </form>
     <script>setTimeout(function(){{document.getElementById('fsbtn').click();}},800);</script>
     """
+
 
 # ─────────────────────────────────────────────────────────
 # SESSION STATE
@@ -224,7 +311,7 @@ def _blank_defaults():
         "h_area_ft2": 0.0, "h_acres": 0.0, "gm_avg": 0.0,
         "official_yield": 0.0, "_agree_gen": 0,
         "_pending_formsubmit": None,
-        "_od_error": None,
+        "_gd_error": None,
     }
 
 def _init_state():
@@ -403,7 +490,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Fire pending FormSubmit at very top of each rerun ────────────
+    # Fire pending FormSubmit at top of each rerun
     pending = st.session_state.get("_pending_formsubmit")
     if pending:
         st.components.v1.html(pending, height=0)
@@ -423,13 +510,12 @@ def main():
     # ── Sidebar ─────────────────────────────────────────
     with st.sidebar:
         st.header("Settings")
-        # OneDrive status check
-        cfg = _od_secrets()
-        if all([cfg.get("client_id"), cfg.get("client_secret"), cfg.get("owner_email")]):
-            st.success("☁️ OneDrive: configured")
+        cfg = _gdrive_secrets()
+        if all([cfg.get("client_email"), cfg.get("private_key"), cfg.get("folder_id")]):
+            st.success("☁️ Google Drive: configured")
         else:
-            st.warning("☁️ OneDrive: secrets missing")
-            st.caption("Add [onedrive] section to Streamlit secrets.")
+            st.warning("☁️ Google Drive: secrets missing")
+            st.caption("Add [gdrive] section to Streamlit secrets.")
         st.divider()
         st.markdown("**Contest Rules**")
         st.info(
@@ -472,7 +558,7 @@ def main():
         st.radio("Contest Division *",
                  ["Division I - Tillage (conv./min.)", "Division II - No-Tillage"],
                  horizontal=True, key="division")
-        st.selectbox("Previous Crop", ["Corn", "Soybeans", "Other"], key="previous_crop")
+        st.selectbox("Previous Crop", ["Corn","Soybeans","Other"], key="previous_crop")
     with c2:
         st.date_input("Planting Date *", key="planting_date")
         st.date_input("Harvest Date *", key="harvest_date")
@@ -742,17 +828,17 @@ def main():
             entry_id = build_excel_with_entry(data, EXCEL_FILE)
             area     = COUNTY_AREA.get(data["County"], 4)
 
-            # 1. Upload to OneDrive
-            st.session_state["_od_error"] = None
-            onedrive_url = upload_excel_to_onedrive(EXCEL_FILE)
+            # 1. Upload to Google Drive silently
+            st.session_state["_gd_error"] = None
+            gdrive_url = upload_excel_to_gdrive(EXCEL_FILE)
 
             # 2. Queue FormSubmit email
             subject = (f"KY Wheat Contest Entry #{entry_id} — "
                        f"{data['County']} County — {data['Producer_Name']}")
             st.session_state["_pending_formsubmit"] = build_formsubmit_html(
-                data, entry_id, subject, onedrive_url=onedrive_url or "")
+                data, entry_id, subject, gdrive_url=gdrive_url or "")
 
-            # 3. Success banner — pure st.* widgets, no raw HTML concat
+            # 3. Success
             st.success(f"✅ Entry #{entry_id} saved!")
             st.markdown(
                 f"**Producer:** {data['Producer_Name']} &nbsp;|&nbsp; "
@@ -768,14 +854,14 @@ def main():
             with col1:
                 st.success("📊 Excel saved")
             with col2:
-                if onedrive_url:
-                    st.success(f"[☁️ View on OneDrive]({onedrive_url})")
+                if gdrive_url:
+                    st.success(f"[☁️ View on Google Drive]({gdrive_url})")
                 else:
-                    od_err = st.session_state.get("_od_error","")
-                    st.warning(f"☁️ OneDrive failed")
-                    if od_err:
+                    gd_err = st.session_state.get("_gd_error","")
+                    st.warning("☁️ Google Drive failed")
+                    if gd_err:
                         with st.expander("Show error detail"):
-                            st.code(od_err)
+                            st.code(gd_err)
             with col3:
                 st.success("📧 Email notification sent")
 
@@ -785,22 +871,19 @@ def main():
                                    file_name=EXCEL_FILENAME,
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-            # Reset agreement for next entry
             st.session_state["_agree_gen"] = st.session_state.get("_agree_gen", 0) + 1
 
         except Exception as ex:
             st.error(f"Error saving entry: {ex}")
 
     # ════════════════════════════════════════════════════
-    # ENTRIES TABLE — FIX: skip the 2 decorative header rows
+    # ENTRIES TABLE
     # ════════════════════════════════════════════════════
     st.divider()
     st.subheader("📋 Current Season Entries")
     if Path(EXCEL_FILE).exists():
         try:
-            # Row 1 = title banner, Row 2 = section colors, Row 3 = column headers
-            df = pd.read_excel(EXCEL_FILE, header=2)   # 0-indexed → row 3
-            # Drop any completely empty rows
+            df = pd.read_excel(EXCEL_FILE, header=2)
             df = df.dropna(how="all")
             show = ["Entry_ID","Submission_Date","County","Area","Producer_Name",
                     "Division","Wheat_Variety","Harvest_Acres",
