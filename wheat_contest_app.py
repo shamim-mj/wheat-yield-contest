@@ -890,21 +890,17 @@ def main():
                                disabled=not form_ready, type="primary",
                                use_container_width=True)
 
-    # ════════════════════════════════════════════════════
-    # ON SUBMIT
+      # ════════════════════════════════════════════════════
+    # ON SUBMIT  — all variables defined in correct order
     # ════════════════════════════════════════════════════
     if submit_clicked and form_ready:
         r   = st.session_state.get("moisture_readings", [])
         gm1 = r[0] if len(r) > 0 else ""
         gm2 = r[1] if len(r) > 1 else ""
         gm3 = r[2] if len(r) > 2 else ""
-        photo_b64 = ""
-        if scale_photo:
-            photo_link = upload_photo_to_gdrive(
-                scale_photo.getvalue(), scale_photo.name,
-                entry_id, st.session_state["county"]
-            )
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        # Build data dict — photo link is placeholder until entry_id exists
         data = {
             "County":                    st.session_state["county"],
             "Producer_Name":             st.session_state["producer_name"],
@@ -947,36 +943,56 @@ def main():
             "Harvest_Width_ft":          st.session_state["h_width"],
             "Harvest_Area_ft2":          st.session_state["h_area_ft2"],
             "Harvest_Acres":             st.session_state["h_acres"],
-            "Grain_Moisture_1":          gm1, "Grain_Moisture_2": gm2, "Grain_Moisture_3": gm3,
+            "Grain_Moisture_1":          gm1,
+            "Grain_Moisture_2":          gm2,
+            "Grain_Moisture_3":          gm3,
             "Grain_Moisture_Avg":        st.session_state["gm_avg"],
-            "Test_Weight_lbbu":          st.session_state.get("test_weight",60.0),
+            "Test_Weight_lbbu":          st.session_state.get("test_weight", 60.0),
             "Grain_Weight_lbs":          st.session_state["grain_weight"],
             "Official_Yield_BuAcre":     st.session_state["official_yield"],
             "Agent_Notes":               st.session_state.get("agent_notes",""),
-            "Scale_Ticket_Photo":        photo_link if photo_link else "[no photo]",
+            "Scale_Ticket_Photo":        "[no photo]",   # updated below after entry_id exists
             "_moisture_list":            r,
             "Submission_Date":           now_str,
         }
+
         try:
+            # STEP 1: Save Excel → entry_id is born here
             entry_id = build_excel_with_entry(data, EXCEL_FILE)
             area     = COUNTY_AREA.get(data["County"], 4)
+
+            # STEP 2: Upload photo NOW (entry_id exists)
+            if scale_photo:
+                photo_link = upload_photo_to_gdrive(
+                    scale_photo.getvalue(), scale_photo.name,
+                    entry_id, st.session_state["county"]
+                )
+                data["Scale_Ticket_Photo"] = photo_link if photo_link else "[upload failed]"
+
+            # STEP 3: Append to Google Sheet (has real photo link now)
             st.session_state["_gd_error"] = None
             sheet_ok = append_entry_to_sheet(data, entry_id)
+
+            # STEP 4: Send email
             subject  = (f"KY Wheat Contest Entry #{entry_id} — "
                         f"{data['County']} County — {data['Producer_Name']}")
             email_ok = send_formsubmit_email(data, entry_id, subject)
 
+            # STEP 5: Success banner
             st.success(f"✅ Entry #{entry_id} submitted successfully!")
             st.markdown(
                 f"**Producer:** {data['Producer_Name']} &nbsp;|&nbsp; "
                 f"**County:** {data['County']} (Area {area}) &nbsp;|&nbsp; "
                 f"**Division:** {data['Division'].split('-')[0].strip()}  \n"
-                f"**Official Yield:** {data['Official_Yield_BuAcre']:.2f} bu/acre &&nbsp;|&nbsp; "
-                f"**Harvest Area:** {data['Harvest_Acres']:.2f} acres &&nbsp;|&nbsp; "
-                f"**Grain Moisture:** {data['Grain_Moisture_Avg']:.11f}%"
+                f"**Official Yield:** {data['Official_Yield_BuAcre']:.2f} bu/acre &nbsp;|&nbsp; "
+                f"**Harvest Area:** {data['Harvest_Acres']:.2f} acres &nbsp;|&nbsp; "
+                f"**Grain Moisture:** {data['Grain_Moisture_Avg']:.1f}%"
             )
+
+            # STEP 6: Status pills
             col1, col2, col3 = st.columns(3)
-            with col1: st.success("📊 Saved to Excel")
+            with col1:
+                st.success("📊 Saved to Excel")
             with col2:
                 if sheet_ok:
                     st.success("☁️ Synced to Google Sheets")
@@ -991,7 +1007,7 @@ def main():
                 else:
                     st.warning("📧 Email failed")
 
-            # ↓ Download button INSIDE try so entry_id is always defined
+            # STEP 7: Download — inside try, entry_id guaranteed
             with open(EXCEL_FILE, "rb") as f:
                 st.download_button(
                     "⬇️ Download My Entry (Excel backup)", data=f,
@@ -999,11 +1015,13 @@ def main():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     help="Download a local backup. This does NOT send another email.")
 
+            # STEP 8: Track session
             st.session_state["session_entries"].append({
-                "Entry #": entry_id, "Producer": data["Producer_Name"],
-                "County": data["County"],
+                "Entry #":    entry_id,
+                "Producer":   data["Producer_Name"],
+                "County":     data["County"],
                 "Yield Bu/A": f"{data['Official_Yield_BuAcre']:.2f}",
-                "Time": now_str,
+                "Time":       now_str,
             })
             st.session_state["_agree_gen"] = st.session_state.get("_agree_gen", 0) + 1
 
