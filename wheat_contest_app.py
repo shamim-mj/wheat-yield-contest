@@ -253,6 +253,92 @@ Submitted: {data.get('Submission_Date','')}"""
         return False
 
 # ─────────────────────────────────────────────────────────
+# upload weight scale to google drive
+# ─────────────────────────────────────────────────────────
+
+
+def upload_photo_to_gdrive(photo_bytes: bytes, filename: str,
+                            entry_id: int, county: str) -> str:
+    """
+    Upload scale ticket photo to Google Drive as an actual image file.
+    Returns a shareable view URL, or empty string on failure.
+    Uses the same service account token as Sheets.
+    """
+    cfg          = _gdrive_secrets()
+    client_email = cfg.get("client_email", "")
+    private_key  = cfg.get("private_key", "")
+    folder_id    = cfg.get("photo_folder_id", cfg.get("sheet_id", ""))
+
+    if not all([client_email, private_key]):
+        return ""
+
+    token = _get_sheets_token(client_email, private_key)
+    if not token:
+        return ""
+
+    try:
+        # Determine MIME type from filename
+        ext  = filename.lower().split(".")[-1]
+        mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "png": "image/png",  "heic": "image/heic",
+                "webp": "image/webp"}.get(ext, "image/jpeg")
+
+        # Rename file to include entry info
+        safe_name = f"Entry_{entry_id}_{county}_{filename}"
+
+        # If photo_folder_id is set, upload there; otherwise upload to root
+        parents = [folder_id] if cfg.get("photo_folder_id") else []
+        metadata = json.dumps({"name": safe_name, "parents": parents}
+                              if parents else {"name": safe_name})
+
+        boundary = "====photo_upload===="
+        body = (
+            f"--{boundary}\r\n"
+            f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{metadata}\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Type: {mime}\r\n\r\n"
+        ).encode("utf-8") + photo_bytes + f"\r\n--{boundary}--".encode("utf-8")
+
+        resp = requests.post(
+            "https://www.googleapis.com/upload/drive/v3/files",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": f"multipart/related; boundary={boundary}",
+            },
+            params={"uploadType": "multipart", "fields": "id"},
+            data=body,
+            timeout=30,
+        )
+
+        if resp.status_code in (200, 201):
+            file_id = resp.json().get("id", "")
+            # Make file publicly viewable so the link works for anyone
+            requests.post(
+                f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions",
+                headers={"Authorization": f"Bearer {token}",
+                         "Content-Type": "application/json"},
+                json={"role": "reader", "type": "anyone"},
+                timeout=10,
+            )
+            return f"https://drive.google.com/file/d/{file_id}/view"
+        return ""
+    except Exception:
+        return ""
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ─────────────────────────────────────────────────────────
 # SESSION STATE
 # ─────────────────────────────────────────────────────────
 
@@ -814,8 +900,10 @@ def main():
         gm3 = r[2] if len(r) > 2 else ""
         photo_b64 = ""
         if scale_photo:
-            photo_b64 = (f"[photo:{scale_photo.name}|"
-                         f"{base64.b64encode(scale_photo.getvalue()).decode()[:100]}...]")
+            photo_link = upload_photo_to_gdrive(
+                scale_photo.getvalue(), scale_photo.name,
+                entry_id, st.session_state["county"]
+            )
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         data = {
             "County":                    st.session_state["county"],
@@ -865,7 +953,7 @@ def main():
             "Grain_Weight_lbs":          st.session_state["grain_weight"],
             "Official_Yield_BuAcre":     st.session_state["official_yield"],
             "Agent_Notes":               st.session_state.get("agent_notes",""),
-            "Scale_Ticket_Photo":        photo_b64 if photo_b64 else "[no photo]",
+            "Scale_Ticket_Photo":        photo_link if photo_link else "[no photo]",
             "_moisture_list":            r,
             "Submission_Date":           now_str,
         }
