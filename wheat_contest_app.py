@@ -94,13 +94,26 @@ def _gdrive_secrets() -> dict:
     except Exception:
         return {}
 
-def _get_sheets_token(client_email: str, private_key: str) -> str | None:
+def _get_google_token(client_email: str, private_key: str, 
+                      scope: str = "sheets") -> str | None:
+    """
+    Single token function for all Google APIs.
+    scope = "sheets" → Sheets read/write
+    scope = "drive"  → Drive file upload
+    scope = "both"   → both scopes combined
+    """
+    scope_map = {
+        "sheets": "https://www.googleapis.com/auth/spreadsheets",
+        "drive":  "https://www.googleapis.com/auth/drive.file",
+        "both":   "https://www.googleapis.com/auth/spreadsheets "
+                  "https://www.googleapis.com/auth/drive.file",
+    }
     try:
         now = int(time.time())
         header  = {"alg": "RS256", "typ": "JWT"}
         payload = {
             "iss":   client_email,
-            "scope": "https://www.googleapis.com/auth/spreadsheets",
+            "scope": scope_map.get(scope, scope_map["sheets"]),
             "aud":   "https://oauth2.googleapis.com/token",
             "iat":   now, "exp": now + 3600,
         }
@@ -122,10 +135,8 @@ def _get_sheets_token(client_email: str, private_key: str) -> str | None:
         data = resp.json()
         if "access_token" in data:
             return data["access_token"]
-        st.session_state["_gd_error"] = f"Token error: {data}"
         return None
-    except Exception as e:
-        st.session_state["_gd_error"] = f"JWT error: {e}"
+    except Exception:
         return None
 
 def append_entry_to_sheet(data: dict, entry_id: int) -> bool:
@@ -136,7 +147,7 @@ def append_entry_to_sheet(data: dict, entry_id: int) -> bool:
     if not all([client_email, private_key, sheet_id]):
         st.session_state["_gd_error"] = "Missing secrets"
         return False
-    token = _get_sheets_token(client_email, private_key)
+    token = _get_google_token(client_email, private_key, scope="sheets")
     if not token:
         return False
     try:
@@ -272,7 +283,7 @@ def upload_photo_to_gdrive(photo_bytes: bytes, filename: str,
     if not all([client_email, private_key]):
         return ""
 
-    token = _get_sheets_token(client_email, private_key)
+    token = _get_google_token(client_email, private_key, scope="drive")
     if not token:
         return ""
 
