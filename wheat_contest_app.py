@@ -1002,7 +1002,7 @@ def main():
             st.session_state["session_entries"].append({
                 "Entry #": entry_id, "Producer": data["Producer_Name"],
                 "County": data["County"],
-                "Yield Bu/A": f"{data['Official_Yield_BuAcre']:.2f}}",
+                "Yield Bu/A": f"{data['Official_Yield_BuAcre']:.2f}",
                 "Time": now_str,
             })
             st.session_state["_agree_gen"] = st.session_state.get("_agree_gen", 0) + 1
