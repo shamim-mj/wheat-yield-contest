@@ -971,9 +971,9 @@ def main():
                 f"**Producer:** {data['Producer_Name']} &nbsp;|&nbsp; "
                 f"**County:** {data['County']} (Area {area}) &nbsp;|&nbsp; "
                 f"**Division:** {data['Division'].split('-')[0].strip()}  \n"
-                f"**Official Yield:** {data['Official_Yield_BuAcre']:.2f} bu/acre &nbsp;|&nbsp; "
-                f"**Harvest Area:** {data['Harvest_Acres']:.2f} acres &nbsp;|&nbsp; "
-                f"**Grain Moisture:** {data['Grain_Moisture_Avg']:.1f}%"
+                f"**Official Yield:** {data['Official_Yield_BuAcre']:.2f} bu/acre &&nbsp;|&nbsp; "
+                f"**Harvest Area:** {data['Harvest_Acres']:.2f} acres &&nbsp;|&nbsp; "
+                f"**Grain Moisture:** {data['Grain_Moisture_Avg']:.11f}%"
             )
             col1, col2, col3 = st.columns(3)
             with col1: st.success("📊 Saved to Excel")
@@ -989,10 +989,12 @@ def main():
                 if email_ok:
                     st.success("📧 Email notification sent")
                 else:
-                    st.warning(f"📧 Email failed")
+                    st.warning("📧 Email failed")
 
+            # ↓ Download button INSIDE try so entry_id is always defined
             with open(EXCEL_FILE, "rb") as f:
-                st.download_button("⬇️ Download My Entry (Excel backup)", data=f,
+                st.download_button(
+                    "⬇️ Download My Entry (Excel backup)", data=f,
                     file_name=f"entry_{entry_id}_{data['County']}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     help="Download a local backup. This does NOT send another email.")
@@ -1000,7 +1002,8 @@ def main():
             st.session_state["session_entries"].append({
                 "Entry #": entry_id, "Producer": data["Producer_Name"],
                 "County": data["County"],
-                "Yield Bu/A": f"{data['Official_Yield_BuAcre']:.2f}", "Time": now_str,
+                "Yield Bu/A": f"{data['Official_Yield_BuAcre']:.2f}}",
+                "Time": now_str,
             })
             st.session_state["_agree_gen"] = st.session_state.get("_agree_gen", 0) + 1
 
