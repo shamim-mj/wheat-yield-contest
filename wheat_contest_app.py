@@ -216,27 +216,42 @@ def append_entry_to_sheet(data: dict, entry_id: int) -> bool:
 
 def upload_photo_to_gdrive(photo_bytes: bytes, filename: str,
                             entry_id: int, county: str) -> str:
+    log = []  # visible debug log — shown in expander after submit
+
     cfg          = _gdrive_secrets()
     client_email = cfg.get("client_email", "")
     private_key  = cfg.get("private_key", "")
     folder_id    = cfg.get("photo_folder_id", "")
+
+    log.append(f"1. photo_bytes size : {len(photo_bytes)} bytes")
+    log.append(f"2. filename         : {filename}")
+    log.append(f"3. client_email     : {'✅ found' if client_email else '❌ MISSING'}")
+    log.append(f"4. private_key      : {'✅ found' if private_key else '❌ MISSING'}")
+    log.append(f"5. photo_folder_id  : {folder_id if folder_id else '❌ MISSING'}")
+
     if not all([client_email, private_key, folder_id]):
-        st.session_state["_gd_error"] = (
-            f"Photo upload skipped — missing photo_folder_id in secrets"
-            if not folder_id else "Missing client_email or private_key")
+        log.append("❌ STOPPED: missing secrets")
+        st.session_state["_photo_debug"] = "\n".join(log)
         return ""
+
     token = _get_google_token(client_email, private_key, scope="drive")
+    log.append(f"6. drive token      : {'✅ obtained' if token else '❌ FAILED'}")
+
     if not token:
-        st.session_state["_gd_error"] = "Drive token failed"
+        st.session_state["_photo_debug"] = "\n".join(log)
         return ""
+
     try:
         ext  = filename.lower().split(".")[-1]
         mime = {"jpg":"image/jpeg","jpeg":"image/jpeg",
                 "png":"image/png","heic":"image/heic",
                 "webp":"image/webp"}.get(ext,"image/jpeg")
         safe_name = f"Entry_{entry_id:03d}_{county}_{filename}"
-        metadata  = json.dumps({"name": safe_name, "parents": [folder_id]})
-        boundary  = "====photo_upload===="
+        log.append(f"7. safe_name        : {safe_name}")
+        log.append(f"8. mime             : {mime}")
+
+        metadata = json.dumps({"name": safe_name, "parents": [folder_id]})
+        boundary = "====photo_upload===="
         body = (
             f"--{boundary}\r\n"
             f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
@@ -244,26 +259,43 @@ def upload_photo_to_gdrive(photo_bytes: bytes, filename: str,
             f"--{boundary}\r\n"
             f"Content-Type: {mime}\r\n\r\n"
         ).encode("utf-8") + photo_bytes + f"\r\n--{boundary}--".encode("utf-8")
+
+        log.append(f"9. body size        : {len(body)} bytes")
+        log.append("10. POSTing to Drive API...")
+
         resp = requests.post(
             "https://www.googleapis.com/upload/drive/v3/files",
             headers={"Authorization": f"Bearer {token}",
                      "Content-Type": f"multipart/related; boundary={boundary}"},
             params={"uploadType":"multipart","fields":"id","supportsAllDrives":"true"},
             data=body, timeout=30)
+
+        log.append(f"11. HTTP status     : {resp.status_code}")
+        log.append(f"12. response body   : {resp.text[:300]}")
+
         if resp.status_code in (200, 201):
             file_id = resp.json().get("id","")
+            log.append(f"13. file_id         : {file_id}")
             if file_id:
-                requests.post(
+                perm = requests.post(
                     f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions",
                     headers={"Authorization": f"Bearer {token}",
                              "Content-Type": "application/json"},
                     params={"supportsAllDrives":"true"},
                     json={"role":"reader","type":"anyone"}, timeout=10)
-                return f"https://drive.google.com/file/d/{file_id}/view"
-        st.session_state["_gd_error"] = f"Photo HTTP {resp.status_code}: {resp.text[:200]}"
+                log.append(f"14. permission set  : HTTP {perm.status_code}")
+                url = f"https://drive.google.com/file/d/{file_id}/view"
+                log.append(f"15. ✅ SUCCESS: {url}")
+                st.session_state["_photo_debug"] = "\n".join(log)
+                return url
+
+        log.append("❌ Upload failed — non-200 status")
+        st.session_state["_photo_debug"] = "\n".join(log)
         return ""
+
     except Exception as e:
-        st.session_state["_gd_error"] = f"Photo exception: {e}"
+        log.append(f"❌ EXCEPTION: {e}")
+        st.session_state["_photo_debug"] = "\n".join(log)
         return ""
 
 # ─────────────────────────────────────────────────────────
@@ -1009,6 +1041,11 @@ def main():
                     st.success("📧 Email notification sent")
                 else:
                     st.warning("📧 Email failed")
+
+            # Always show photo upload debug log so we can diagnose
+            if st.session_state.get("_photo_debug"):
+                with st.expander("📷 Photo upload log (tap to see)", expanded=True):
+                    st.code(st.session_state["_photo_debug"])
 
             with open(EXCEL_FILE, "rb") as f:
                 st.download_button(
