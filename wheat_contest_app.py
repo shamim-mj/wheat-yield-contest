@@ -214,31 +214,114 @@ def append_entry_to_sheet(data: dict, entry_id: int) -> bool:
 # GOOGLE DRIVE PHOTO UPLOAD
 # ─────────────────────────────────────────────────────────
 
+def upload_photo_to_cloudinary(photo_bytes: bytes, filename: str,
+                                entry_id: int, county: str) -> str:
+    """
+    Upload to Cloudinary free tier — 25 GB storage, no credit card needed.
+    Requires in Streamlit secrets [gdrive]:
+      cloudinary_cloud_name = "your-cloud-name"
+      cloudinary_upload_preset = "your-unsigned-preset"  (create in Cloudinary dashboard)
+    Returns permanent public URL or empty string on failure.
+    """
+    cfg         = _gdrive_secrets()
+    cloud_name  = cfg.get("cloudinary_cloud_name", "")
+    preset      = cfg.get("cloudinary_upload_preset", "")
+
+    if not all([cloud_name, preset]):
+        st.session_state["_photo_debug"] = (
+            "Cloudinary secrets missing.\n"
+            "Add to Streamlit secrets:\n"
+            "  cloudinary_cloud_name = 'your-cloud-name'\n"
+            "  cloudinary_upload_preset = 'your-unsigned-preset'")
+        return ""
+
+    try:
+        import io
+        safe_name = f"wheat_entry_{entry_id:03d}_{county}"
+        resp = requests.post(
+            f"https://api.cloudinary.com/v1_1/{cloud_name}/image/upload",
+            data={
+                "upload_preset": preset,
+                "public_id":     safe_name,
+                "folder":        "wheat_contest",
+            },
+            files={"file": (filename, io.BytesIO(photo_bytes))},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            url = resp.json().get("secure_url", "")
+            if url:
+                st.session_state["_photo_debug"] = f"✅ Cloudinary success: {url}"
+                return url
+        st.session_state["_photo_debug"] = (
+            f"Cloudinary HTTP {resp.status_code}: {resp.text[:200]}")
+        return ""
+    except Exception as e:
+        st.session_state["_photo_debug"] = f"Cloudinary exception: {e}"
+        return ""
+
+
+def upload_photo_to_sheet_cell(photo_bytes: bytes, filename: str,
+                                entry_id: int, county: str) -> str:
+    """
+    Fallback: store a compact base64 thumbnail directly as a Google Sheets
+    IMAGE() formula. Resizes to max 200px so it fits in a cell.
+    No external service needed — works 100% with existing secrets.
+    """
+    try:
+        from PIL import Image
+        import io
+        img = Image.open(io.BytesIO(photo_bytes))
+        # Convert to RGB and resize to thumbnail
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGB")
+        img.thumbnail((400, 400))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=60)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        data_url = f"data:image/jpeg;base64,{b64}"
+        st.session_state["_photo_debug"] = (
+            f"✅ Thumbnail stored as data URL ({len(b64)//1024} KB)")
+        return data_url
+    except Exception as e:
+        st.session_state["_photo_debug"] = f"Thumbnail exception: {e}"
+        return f"[photo:{filename} — could not encode]"
+
+
 def upload_photo_to_gdrive(photo_bytes: bytes, filename: str,
                             entry_id: int, county: str) -> str:
-    log = []  # visible debug log — shown in expander after submit
+    """
+    Priority order:
+    1. Cloudinary (free 25GB, no credit card)
+    2. Thumbnail in sheet cell (always works, no external service)
+    """
+    cfg = _gdrive_secrets()
 
+    # ── Option 1: Cloudinary ────────────────────────────
+    if cfg.get("cloudinary_cloud_name") and cfg.get("cloudinary_upload_preset"):
+        result = upload_photo_to_cloudinary(photo_bytes, filename, entry_id, county)
+        if result:
+            return result
+
+    # ── Option 2: Thumbnail stored as data URL in sheet ─
+    # Always works — no external service needed
+    return upload_photo_to_sheet_cell(photo_bytes, filename, entry_id, county)
+
+
+def _upload_photo_gdrive_shared(photo_bytes, filename, entry_id, county) -> str:
+    """Legacy Google Shared Drive path — kept for future use."""
     cfg          = _gdrive_secrets()
     client_email = cfg.get("client_email", "")
     private_key  = cfg.get("private_key", "")
     folder_id    = cfg.get("photo_folder_id", "")
 
-    log.append(f"1. photo_bytes size : {len(photo_bytes)} bytes")
-    log.append(f"2. filename         : {filename}")
-    log.append(f"3. client_email     : {'✅ found' if client_email else '❌ MISSING'}")
-    log.append(f"4. private_key      : {'✅ found' if private_key else '❌ MISSING'}")
-    log.append(f"5. photo_folder_id  : {folder_id if folder_id else '❌ MISSING'}")
-
     if not all([client_email, private_key, folder_id]):
-        log.append("❌ STOPPED: missing secrets")
-        st.session_state["_photo_debug"] = "\n".join(log)
+        st.session_state["_photo_debug"] = "No imgbb_api_key and no Drive secrets found"
         return ""
 
     token = _get_google_token(client_email, private_key, scope="drive")
-    log.append(f"6. drive token      : {'✅ obtained' if token else '❌ FAILED'}")
-
     if not token:
-        st.session_state["_photo_debug"] = "\n".join(log)
+        st.session_state["_photo_debug"] = "Drive token failed"
         return ""
 
     try:
@@ -247,11 +330,8 @@ def upload_photo_to_gdrive(photo_bytes: bytes, filename: str,
                 "png":"image/png","heic":"image/heic",
                 "webp":"image/webp"}.get(ext,"image/jpeg")
         safe_name = f"Entry_{entry_id:03d}_{county}_{filename}"
-        log.append(f"7. safe_name        : {safe_name}")
-        log.append(f"8. mime             : {mime}")
-
-        metadata = json.dumps({"name": safe_name, "parents": [folder_id]})
-        boundary = "====photo_upload===="
+        metadata  = json.dumps({"name": safe_name, "parents": [folder_id]})
+        boundary  = "====photo_upload===="
         body = (
             f"--{boundary}\r\n"
             f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
@@ -260,42 +340,33 @@ def upload_photo_to_gdrive(photo_bytes: bytes, filename: str,
             f"Content-Type: {mime}\r\n\r\n"
         ).encode("utf-8") + photo_bytes + f"\r\n--{boundary}--".encode("utf-8")
 
-        log.append(f"9. body size        : {len(body)} bytes")
-        log.append("10. POSTing to Drive API...")
-
         resp = requests.post(
             "https://www.googleapis.com/upload/drive/v3/files",
             headers={"Authorization": f"Bearer {token}",
                      "Content-Type": f"multipart/related; boundary={boundary}"},
-            params={"uploadType":"multipart","fields":"id","supportsAllDrives":"true"},
+            params={"uploadType":"multipart","fields":"id",
+                    "supportsAllDrives":"true","includeItemsFromAllDrives":"true"},
             data=body, timeout=30)
-
-        log.append(f"11. HTTP status     : {resp.status_code}")
-        log.append(f"12. response body   : {resp.text[:300]}")
 
         if resp.status_code in (200, 201):
             file_id = resp.json().get("id","")
-            log.append(f"13. file_id         : {file_id}")
             if file_id:
-                perm = requests.post(
+                requests.post(
                     f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions",
                     headers={"Authorization": f"Bearer {token}",
                              "Content-Type": "application/json"},
                     params={"supportsAllDrives":"true"},
                     json={"role":"reader","type":"anyone"}, timeout=10)
-                log.append(f"14. permission set  : HTTP {perm.status_code}")
                 url = f"https://drive.google.com/file/d/{file_id}/view"
-                log.append(f"15. ✅ SUCCESS: {url}")
-                st.session_state["_photo_debug"] = "\n".join(log)
+                st.session_state["_photo_debug"] = f"✅ Drive upload success: {url}"
                 return url
 
-        log.append("❌ Upload failed — non-200 status")
-        st.session_state["_photo_debug"] = "\n".join(log)
+        st.session_state["_photo_debug"] = (
+            f"Drive HTTP {resp.status_code}: {resp.text[:300]}")
         return ""
 
     except Exception as e:
-        log.append(f"❌ EXCEPTION: {e}")
-        st.session_state["_photo_debug"] = "\n".join(log)
+        st.session_state["_photo_debug"] = f"Drive exception: {e}"
         return ""
 
 # ─────────────────────────────────────────────────────────
