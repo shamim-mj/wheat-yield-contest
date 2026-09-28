@@ -566,7 +566,7 @@ def main():
 
     col_clr, _ = st.columns([1, 5])
     with col_clr:
-        if st.button("🔄 Clear Form", use_container_width=True):
+        if st.button("🔄 Clear Form", width=True):
             _clear_form()
     st.divider()
 
@@ -580,7 +580,7 @@ def main():
             with open(rules_path, "rb") as f:
                 st.download_button("⬇️ Download Contest Rules (PDF)",
                     data=f, file_name="KY_Wheat_Contest_Rules.pdf",
-                    mime="application/pdf", use_container_width=True)
+                    mime="application/pdf", width=True)
         else:
             st.info(
                 "- Min. **1.5 acres** harvested\n"
@@ -743,9 +743,9 @@ def main():
     with mc2:
         st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
         st.button("➕ Add Reading", disabled=(slots_left==0),
-                  use_container_width=True, on_click=_add_reading_cb)
+                  width=True, on_click=_add_reading_cb)
         if readings_now:
-            st.button("🗑️ Clear", use_container_width=True, on_click=_clear_readings_cb)
+            st.button("🗑️ Clear", width=True, on_click=_clear_readings_cb)
     with mc3:
         gm_avg = st.session_state["gm_avg"]
         if readings_now:
@@ -831,7 +831,7 @@ def main():
         if scale_photo:
             st.image(scale_photo,
                      caption=f"✅ {scale_photo.name}  ({scale_photo.size/1024:.0f} KB)",
-                     use_container_width=True)
+                     width=True)
             st.success("Photo will be saved with this entry.")
         else:
             st.markdown("""
@@ -899,7 +899,7 @@ def main():
 
     submit_clicked = st.button("💾  Save Entry & Send to State Office",
                                disabled=not form_ready, type="primary",
-                               use_container_width=True)
+                               width=True)
 
       # ════════════════════════════════════════════════════
     # ON SUBMIT  — all variables defined in correct order
@@ -980,6 +980,18 @@ def main():
                 )
                 data["Scale_Ticket_Photo"] = photo_link if photo_link else "[upload failed]"
 
+                # Temp Start
+            if scale_photo:
+                photo_link = upload_photo_to_gdrive(
+                    scale_photo.getvalue(), scale_photo.name,
+                    entry_id, st.session_state["county"]
+                )
+                st.write(f"DEBUG photo_link = '{photo_link}'")          # ← add this
+                st.write(f"DEBUG _gd_error = '{st.session_state.get('_gd_error')}'")  # ← and this
+                data["Scale_Ticket_Photo"] = photo_link if photo_link else "[upload failed]"
+
+                # Temp finish
+
             # STEP 3: Append to Google Sheet (has real photo link now)
             st.session_state["_gd_error"] = None
             sheet_ok = append_entry_to_sheet(data, entry_id)
@@ -1045,7 +1057,7 @@ def main():
         st.divider()
         st.subheader(f"📋 Your Submissions This Session ({len(session_entries)})")
         st.caption("Entries submitted during this browser session — securely saved to the state office.")
-        st.dataframe(pd.DataFrame(session_entries), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(session_entries), width=True, hide_index=True)
 
     # ── Contact footer ───────────────────────────────────
     st.divider()
