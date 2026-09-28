@@ -792,13 +792,34 @@ def main():
 
         # Show preview from session state (works even after rerun)
         if st.session_state.get("_photo_bytes"):
+            fname = st.session_state.get("_photo_filename", "photo")
+            fsize = st.session_state.get("_photo_size", 0)
+            caption = f"✅ {fname}  ({fsize/1024:.0f} KB)"
+            _shown = False
+            # Try PIL conversion first — catches HEIC, zero-dim, corrupt files
             try:
-                st.image(st.session_state["_photo_bytes"],
-                         caption=f"✅ {st.session_state['_photo_filename']} "
-                                 f"({st.session_state.get('_photo_size',0)/1024:.0f} KB)",
-                         width='stretch')
+                from PIL import Image
+                import io
+                img = Image.open(io.BytesIO(st.session_state["_photo_bytes"]))
+                # Convert to RGB PNG so Streamlit/PIL can always display it
+                if img.mode not in ("RGB", "RGBA"):
+                    img = img.convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                buf.seek(0)
+                st.image(buf.read(), caption=caption, width="stretch")
+                _shown = True
             except Exception:
-                st.info(f"✅ Photo ready: {st.session_state.get('_photo_filename','')}")
+                pass
+            if not _shown:
+                # Fallback — just show file info, no preview
+                st.markdown(
+                    f'<div style="background:#e8f5e9;border:1px solid #a5d6a7;'
+                    f'border-radius:8px;padding:12px 16px;font-size:0.9rem;">'
+                    f'📎 <b>{fname}</b> &nbsp;·&nbsp; {fsize/1024:.0f} KB<br>'
+                    f'<span style="color:#555;font-size:0.8rem">'
+                    f'Preview not available for this file type</span></div>',
+                    unsafe_allow_html=True)
             st.success("Photo will be saved with this entry.")
         else:
             st.markdown("""
