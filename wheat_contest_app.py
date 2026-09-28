@@ -571,6 +571,72 @@ def build_excel_with_entry(data: dict, filepath: str) -> int:
     wb.save(filepath)
     return entry_id
 
+def build_single_entry_excel(data: dict) -> bytes:
+    """
+    Build an Excel file containing ONLY this one entry — for agent download.
+    Does NOT include any other entries from the master database.
+    Returns the file as bytes (not saved to disk).
+    """
+    import io
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Entry Receipt"
+
+    entry_id = data.get("Entry_ID", "")
+    county   = data.get("County", "")
+
+    # Title row
+    ws.merge_cells(f"A1:{get_column_letter(len(COLUMNS))}1")
+    t = ws["A1"]
+    t.value     = (f"Kentucky Wheat Yield Contest {CURRENT_YEAR} — "
+                   f"Entry #{entry_id} — {county} County")
+    t.font      = Font(bold=True, size=13, color="FFFFFF", name="Arial")
+    t.fill      = PatternFill("solid", fgColor=HEADER_FILL)
+    t.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 26
+
+    # Section spans row
+    for label, c1, c2, color in SECTION_SPANS:
+        ws.merge_cells(start_row=2, start_column=c1, end_row=2, end_column=c2)
+        cell = ws.cell(row=2, column=c1, value=label)
+        cell.font      = Font(bold=True, color="FFFFFF", name="Arial", size=9)
+        cell.fill      = PatternFill("solid", fgColor=color)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[2].height = 16
+
+    # Header row
+    for ci, col in enumerate(COLUMNS, 1):
+        cell = ws.cell(row=3, column=ci, value=col.replace("_", " "))
+        cell.font      = Font(bold=True, color="FFFFFF", name="Arial", size=9)
+        cell.fill      = PatternFill("solid", fgColor="4A4A4A")
+        cell.alignment = Alignment(horizontal="center", vertical="center",
+                                   wrap_text=True)
+        s = Side(style="thin", color="AAAAAA")
+        cell.border    = Border(left=s, right=s, top=s, bottom=s)
+    ws.row_dimensions[3].height = 40
+
+    # Single data row
+    for ci, col in enumerate(COLUMNS, 1):
+        cell = ws.cell(row=4, column=ci, value=data.get(col, ""))
+        cell.font      = Font(name="Arial", size=10)
+        cell.fill      = PatternFill("solid", fgColor="EBF5FB")
+        cell.alignment = Alignment(horizontal="left", vertical="center",
+                                   wrap_text=True)
+        s = Side(style="thin", color="AAAAAA")
+        cell.border    = Border(left=s, right=s, top=s, bottom=s)
+    ws.row_dimensions[4].height = 20
+
+    # Column widths
+    for i in range(1, len(COLUMNS) + 1):
+        ws.column_dimensions[get_column_letter(i)].width = 16
+
+    ws.freeze_panes = "A4"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
 # ─────────────────────────────────────────────────────────
 # MAIN APP
 # ─────────────────────────────────────────────────────────
@@ -995,9 +1061,9 @@ def main():
         st.caption("🔒 Check the certification box above to unlock." if not agreement
                    else "🔒 Fix the highlighted fields above to unlock.")
 
-    submit_clicked = st.button("💾  Save Entry & Send to State Office",
+    submit_clicked = st.button("💾  Save Entry & Send to Office",
                                disabled=not form_ready, type="primary",
-                               width='stretch')
+                               width= 'content')
 
     # ════════════════════════════════════════════════════
     # ON SUBMIT
@@ -1104,16 +1170,16 @@ def main():
                 f"**Grain Moisture:** {data['Grain_Moisture_Avg']:.1f}%"
             )
 
-            col1, col2, col3 = st.columns(3)
+            col1, col3 = st.columns(2)
             with col1: st.success("📊 Saved to Excel")
-            with col2:
-                if sheet_ok:
-                    st.success("☁️ Synced to Google Sheets")
-                else:
-                    st.warning("☁️ Sheets sync failed")
-                    if st.session_state.get("_gd_error"):
-                        with st.expander("Error detail"):
-                            st.code(st.session_state["_gd_error"])
+            # with col2:
+            #     if sheet_ok:
+            #         st.success("☁️ Synced to Google Sheets")
+            #     else:
+            #         st.warning("☁️ Sheets sync failed")
+            #         if st.session_state.get("_gd_error"):
+            #             with st.expander("Error detail"):
+            #                 st.code(st.session_state["_gd_error"])
             with col3:
                 if email_ok:
                     st.success("📧 Email notification sent")
@@ -1121,34 +1187,43 @@ def main():
                     st.warning("📧 Email failed")
 
             # Photo status
-            if st.session_state.get("_photo_debug"):
-                photo_url = st.session_state.get("_photo_data_url")
-                if photo_url:
-                    # No cloud host — show image inline and offer download
-                    st.info("📷 Photo stored locally — no cloud host configured. "
-                            "Set up Cloudinary for permanent URLs in Google Sheet.")
-                    with st.expander("📷 View Scale Ticket Photo", expanded=True):
-                        st.image(photo_url, caption=f"Entry #{entry_id} scale ticket",
-                                 width="stretch")
-                        # Offer as downloadable file
-                        import io as _io
-                        img_bytes = base64.b64decode(photo_url.split(",")[1])
-                        st.download_button(
-                            "⬇️ Download Photo",
-                            data=img_bytes,
-                            file_name=f"entry_{entry_id}_scale_ticket.jpg",
-                            mime="image/jpeg"
-                        )
-                else:
-                    with st.expander("📷 Photo upload log", expanded=False):
-                        st.code(st.session_state["_photo_debug"])
+            # if st.session_state.get("_photo_debug"):
+            #     photo_url = st.session_state.get("_photo_data_url")
+            #     if photo_url:
+            #         # No cloud host — show image inline and offer download
+            #         st.info("📷 Photo stored locally — no cloud host configured. "
+            #                 "Set up Cloudinary for permanent URLs in Google Sheet.")
+            #         with st.expander("📷 View Scale Ticket Photo", expanded=True):
+            #             st.image(photo_url, caption=f"Entry #{entry_id} scale ticket",
+            #                      width="stretch")
+            #             # Offer as downloadable file
+            #             import io as _io
+            #             img_bytes = base64.b64decode(photo_url.split(",")[1])
+            #             st.download_button(
+            #                 "⬇️ Download Photo",
+            #                 data=img_bytes,
+            #                 file_name=f"entry_{entry_id}_scale_ticket.jpg",
+            #                 mime="image/jpeg"
+            #             )
+            #     else:
+            #         with st.expander("📷 Photo upload log", expanded=False):
+            #             st.code(st.session_state["_photo_debug"])
 
-            with open(EXCEL_FILE, "rb") as f:
-                st.download_button(
-                    "⬇️ Download My Entry (Excel backup)", data=f,
-                    file_name=f"entry_{entry_id}_{data['County']}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    help="Does NOT send another email.")
+            # with open(EXCEL_FILE, "rb") as f:
+            #     st.download_button(
+            #         "⬇️ Download My Entry (Excel backup)", data=f,
+            #         file_name=f"entry_{entry_id}_{data['County']}.xlsx",
+            #         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            #         help="Does NOT send another email.")
+
+            # Single-entry Excel — contains ONLY this entry, not the master database
+            single_xlsx = build_single_entry_excel(data)
+            st.download_button(
+                "⬇️ Download My Entry Receipt (Excel)",
+                data=single_xlsx,
+                file_name=f"entry_{entry_id}_{data['County']}_receipt.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Contains only YOUR entry — no other entries included.")
 
             st.session_state["session_entries"].append({
                 "Entry #": entry_id, "Producer": data["Producer_Name"],
@@ -1160,6 +1235,7 @@ def main():
 
         except Exception as ex:
             st.error(f"Error saving entry: {ex}")
+            
 
     # ── Session entries ──────────────────────────────────
     session_entries = st.session_state.get("session_entries", [])
