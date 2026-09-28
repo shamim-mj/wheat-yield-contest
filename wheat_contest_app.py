@@ -272,7 +272,8 @@ def upload_photo_to_sheet_cell(photo_bytes: bytes, filename: str,
         from PIL import Image
         import io
         img = Image.open(io.BytesIO(photo_bytes))
-        if img.mode not in ("RGB", "RGBA"):
+        # JPEG does not support transparency — always convert to RGB
+        if img.mode != "RGB":
             img = img.convert("RGB")
         # Resize to max 800px for reasonable size
         img.thumbnail((800, 800))
@@ -911,7 +912,7 @@ def main():
                 import io
                 img = Image.open(io.BytesIO(st.session_state["_photo_bytes"]))
                 # Convert to RGB PNG so Streamlit/PIL can always display it
-                if img.mode not in ("RGB", "RGBA"):
+                if img.mode != "RGB":
                     img = img.convert("RGB")
                 buf = io.BytesIO()
                 img.save(buf, format="PNG")
