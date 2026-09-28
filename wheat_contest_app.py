@@ -725,12 +725,12 @@ def main():
                 "- Submit grain sample to **Colette Laurent**, Princeton KY\n"
                 "- Official yield at **13.5% moisture**"
             )
-        st.divider()
-        cfg = _gdrive_secrets()
-        if all([cfg.get("client_email"), cfg.get("private_key"), cfg.get("sheet_id")]):
-            st.success("📊 Google Sheets: connected")
-        else:
-            st.warning("📊 Google Sheets: not configured")
+        # st.divider()
+        # cfg = _gdrive_secrets()
+        # if all([cfg.get("client_email"), cfg.get("private_key"), cfg.get("sheet_id")]):
+        #     st.success("📊 Google Sheets: connected")
+        # else:
+        #     st.warning("📊 Google Sheets: not configured")
 
     # ════════════════════════════════════════════════════
     # SECTION 1 — PRODUCER & SUPERVISOR
@@ -1063,7 +1063,7 @@ def main():
 
     submit_clicked = st.button("💾  Save Entry & Send to Office",
                                disabled=not form_ready, type="primary",
-                               width= 'content')
+                               width= 'stretch')
 
     # ════════════════════════════════════════════════════
     # ON SUBMIT
