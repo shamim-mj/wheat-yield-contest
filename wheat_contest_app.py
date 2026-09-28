@@ -11,16 +11,12 @@ from openpyxl.utils import get_column_letter
 import datetime, requests, json, time, base64
 from pathlib import Path
 
-# ═════════════════════════════════════════════════════════
-#  OWNER CONFIG
-# ═════════════════════════════════════════════════════════
 FORMSUBMIT_EMAIL  = "shamim.one@outlook.com"
 CC_EMAIL          = "mshamim11@uky.edu"
 CONTACT_EMAIL     = "chad.lee@uky.edu"
 EXCEL_FILENAME    = "wheat_contest_entries.xlsx"
 EXCEL_FILE        = f"/tmp/{EXCEL_FILENAME}"
 CURRENT_YEAR      = datetime.date.today().year
-# ═════════════════════════════════════════════════════════
 
 KY_COUNTIES = sorted([
     "Adair","Allen","Anderson","Ballard","Barren","Bath","Bell","Boone",
@@ -85,7 +81,7 @@ SECTION_SPANS = [
 ]
 
 # ─────────────────────────────────────────────────────────
-# GOOGLE SHEETS
+# GOOGLE TOKEN — single function for sheets + drive
 # ─────────────────────────────────────────────────────────
 
 def _gdrive_secrets() -> dict:
@@ -94,19 +90,11 @@ def _gdrive_secrets() -> dict:
     except Exception:
         return {}
 
-def _get_google_token(client_email: str, private_key: str, 
+def _get_google_token(client_email: str, private_key: str,
                       scope: str = "sheets") -> str | None:
-    """
-    Single token function for all Google APIs.
-    scope = "sheets" → Sheets read/write
-    scope = "drive"  → Drive file upload
-    scope = "both"   → both scopes combined
-    """
     scope_map = {
         "sheets": "https://www.googleapis.com/auth/spreadsheets",
         "drive":  "https://www.googleapis.com/auth/drive.file",
-        "both":   "https://www.googleapis.com/auth/spreadsheets "
-                  "https://www.googleapis.com/auth/drive.file",
     }
     try:
         now = int(time.time())
@@ -119,8 +107,8 @@ def _get_google_token(client_email: str, private_key: str,
         }
         def b64(data: bytes) -> str:
             return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-        h = b64(json.dumps(header).encode())
-        p = b64(json.dumps(payload).encode())
+        h   = b64(json.dumps(header).encode())
+        p   = b64(json.dumps(payload).encode())
         msg = f"{h}.{p}".encode()
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
@@ -138,6 +126,10 @@ def _get_google_token(client_email: str, private_key: str,
         return None
     except Exception:
         return None
+
+# ─────────────────────────────────────────────────────────
+# GOOGLE SHEETS
+# ─────────────────────────────────────────────────────────
 
 def append_entry_to_sheet(data: dict, entry_id: int) -> bool:
     cfg          = _gdrive_secrets()
@@ -219,7 +211,63 @@ def append_entry_to_sheet(data: dict, entry_id: int) -> bool:
         return False
 
 # ─────────────────────────────────────────────────────────
-# FORMSUBMIT — server-side, never fires on page load
+# GOOGLE DRIVE PHOTO UPLOAD
+# ─────────────────────────────────────────────────────────
+
+def upload_photo_to_gdrive(photo_bytes: bytes, filename: str,
+                            entry_id: int, county: str) -> str:
+    cfg          = _gdrive_secrets()
+    client_email = cfg.get("client_email", "")
+    private_key  = cfg.get("private_key", "")
+    folder_id    = cfg.get("photo_folder_id", "")
+    if not all([client_email, private_key, folder_id]):
+        st.session_state["_gd_error"] = (
+            f"Photo upload skipped — missing photo_folder_id in secrets"
+            if not folder_id else "Missing client_email or private_key")
+        return ""
+    token = _get_google_token(client_email, private_key, scope="drive")
+    if not token:
+        st.session_state["_gd_error"] = "Drive token failed"
+        return ""
+    try:
+        ext  = filename.lower().split(".")[-1]
+        mime = {"jpg":"image/jpeg","jpeg":"image/jpeg",
+                "png":"image/png","heic":"image/heic",
+                "webp":"image/webp"}.get(ext,"image/jpeg")
+        safe_name = f"Entry_{entry_id:03d}_{county}_{filename}"
+        metadata  = json.dumps({"name": safe_name, "parents": [folder_id]})
+        boundary  = "====photo_upload===="
+        body = (
+            f"--{boundary}\r\n"
+            f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{metadata}\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Type: {mime}\r\n\r\n"
+        ).encode("utf-8") + photo_bytes + f"\r\n--{boundary}--".encode("utf-8")
+        resp = requests.post(
+            "https://www.googleapis.com/upload/drive/v3/files",
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": f"multipart/related; boundary={boundary}"},
+            params={"uploadType":"multipart","fields":"id","supportsAllDrives":"true"},
+            data=body, timeout=30)
+        if resp.status_code in (200, 201):
+            file_id = resp.json().get("id","")
+            if file_id:
+                requests.post(
+                    f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions",
+                    headers={"Authorization": f"Bearer {token}",
+                             "Content-Type": "application/json"},
+                    params={"supportsAllDrives":"true"},
+                    json={"role":"reader","type":"anyone"}, timeout=10)
+                return f"https://drive.google.com/file/d/{file_id}/view"
+        st.session_state["_gd_error"] = f"Photo HTTP {resp.status_code}: {resp.text[:200]}"
+        return ""
+    except Exception as e:
+        st.session_state["_gd_error"] = f"Photo exception: {e}"
+        return ""
+
+# ─────────────────────────────────────────────────────────
+# FORMSUBMIT
 # ─────────────────────────────────────────────────────────
 
 def send_formsubmit_email(data: dict, entry_id: int, subject: str) -> bool:
@@ -245,109 +293,23 @@ HARVEST AREA
   {data.get('Harvest_Length_ft',0)} ft x {data.get('Harvest_Width_ft',0)} ft = {data.get('Harvest_Acres',0):.2f} acres
 
 GRAIN
-  Moisture: {readings_str}  →  Avg {data.get('Grain_Moisture_Avg',0):.1f}%
+  Moisture: {readings_str}  Avg {data.get('Grain_Moisture_Avg',0):.1f}%
   Grain Weight: {data.get('Grain_Weight_lbs',0):,.0f} lbs
 
 OFFICIAL YIELD: {data.get('Official_Yield_BuAcre',0):.2f} bu/acre
+SCALE TICKET:   {data.get('Scale_Ticket_Photo','[no photo]')}
 
 Submitted: {data.get('Submission_Date','')}"""
     try:
         resp = requests.post(
             f"https://formsubmit.co/ajax/{FORMSUBMIT_EMAIL}",
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            json={"subject": subject, "cc": CC_EMAIL,
-                  "_captcha": "false", "message": body},
+            headers={"Content-Type":"application/json","Accept":"application/json"},
+            json={"subject":subject,"cc":CC_EMAIL,"_captcha":"false","message":body},
             timeout=15)
         return resp.status_code == 200
     except Exception as e:
         st.session_state["_email_error"] = str(e)
         return False
-
-# ─────────────────────────────────────────────────────────
-# upload weight scale to google drive
-# ─────────────────────────────────────────────────────────
-
-
-def upload_photo_to_gdrive(photo_bytes: bytes, filename: str,
-                            entry_id: int, county: str) -> str:
-    """
-    Upload scale ticket photo to Google Drive as an actual image file.
-    Returns a shareable view URL, or empty string on failure.
-    Uses the same service account token as Sheets.
-    """
-    cfg          = _gdrive_secrets()
-    client_email = cfg.get("client_email", "")
-    private_key  = cfg.get("private_key", "")
-    folder_id    = cfg.get("photo_folder_id", cfg.get("sheet_id", ""))
-
-    if not all([client_email, private_key]):
-        return ""
-
-    token = _get_google_token(client_email, private_key, scope="drive")
-    if not token:
-        return ""
-
-    try:
-        # Determine MIME type from filename
-        ext  = filename.lower().split(".")[-1]
-        mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
-                "png": "image/png",  "heic": "image/heic",
-                "webp": "image/webp"}.get(ext, "image/jpeg")
-
-        # Rename file to include entry info
-        safe_name = f"Entry_{entry_id}_{county}_{filename}"
-
-        # If photo_folder_id is set, upload there; otherwise upload to root
-        parents = [folder_id] if cfg.get("photo_folder_id") else []
-        metadata = json.dumps({"name": safe_name, "parents": parents}
-                              if parents else {"name": safe_name})
-
-        boundary = "====photo_upload===="
-        body = (
-            f"--{boundary}\r\n"
-            f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
-            f"{metadata}\r\n"
-            f"--{boundary}\r\n"
-            f"Content-Type: {mime}\r\n\r\n"
-        ).encode("utf-8") + photo_bytes + f"\r\n--{boundary}--".encode("utf-8")
-
-        resp = requests.post(
-            "https://www.googleapis.com/upload/drive/v3/files",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": f"multipart/related; boundary={boundary}",
-            },
-            params={"uploadType": "multipart", "fields": "id"},
-            data=body,
-            timeout=30,
-        )
-
-        if resp.status_code in (200, 201):
-            file_id = resp.json().get("id", "")
-            # Make file publicly viewable so the link works for anyone
-            requests.post(
-                f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions",
-                headers={"Authorization": f"Bearer {token}",
-                         "Content-Type": "application/json"},
-                json={"role": "reader", "type": "anyone"},
-                timeout=10,
-            )
-            return f"https://drive.google.com/file/d/{file_id}/view"
-        return ""
-    except Exception:
-        return ""
-
-
-
-
-
-
-
-
-
-
-
-
 
 # ─────────────────────────────────────────────────────────
 # SESSION STATE
@@ -385,6 +347,8 @@ def _blank_defaults():
         "h_area_ft2": 0.0, "h_acres": 0.0, "gm_avg": 0.0,
         "official_yield": 0.0, "_agree_gen": 0,
         "_gd_error": None,
+        # FIX: photo stored in session state so it survives Streamlit rerun
+        "_photo_bytes": None, "_photo_filename": None, "_photo_size": 0,
     }
 
 def _init_state():
@@ -530,10 +494,9 @@ def main():
         font-size:0.82rem;color:#e8f5e9;margin-top:10px;backdrop-filter:blur(4px)}
     .sec-hdr{font-size:1.05rem;font-weight:700;padding:7px 14px;
         border-radius:5px;margin:20px 0 8px 0;color:white}
-    .s1{background:#1F4E79}.s1b{background:#2E5FA3}.s2{background:#375623}
-    .s3{background:#7B3F00}.s4{background:#6B2737}.s5{background:#4A235A}
-    .s6{background:#7E5109}.s7{background:#1A5276}.s8{background:#555555}
-    /* Subsection divider inside Section 1 */
+    .s1{background:#1F4E79}.s2{background:#375623}.s3{background:#7B3F00}
+    .s4{background:#6B2737}.s5{background:#4A235A}.s6{background:#7E5109}
+    .s7{background:#1A5276}.s8{background:#555555}
     .sub-divider{border:none;border-top:2px dashed #cbd5e0;margin:18px 0 14px 0}
     .sub-label{font-size:0.8rem;font-weight:700;text-transform:uppercase;
         letter-spacing:0.8px;color:#718096;margin-bottom:8px;margin-top:4px}
@@ -552,21 +515,18 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Hero header ──────────────────────────────────────
     st.markdown(f"""
     <div class="hero-banner">
       <div class="hero-year">{CURRENT_YEAR}</div>
       <div class="hero-title">🌾 Kentucky Wheat Yield Contest</div>
-      <div class="hero-subtitle">
-        University of Kentucky Cooperative Extension — Digital Entry Form
-      </div>
+      <div class="hero-subtitle">University of Kentucky Cooperative Extension — Digital Entry Form</div>
       <div class="hero-badge">📅 Contest Year {CURRENT_YEAR} &nbsp;·&nbsp; Official Submission Portal</div>
     </div>
     """, unsafe_allow_html=True)
 
     col_clr, _ = st.columns([1, 5])
     with col_clr:
-        if st.button("🔄 Clear Form", width=True):
+        if st.button("🔄 Clear Form", width='stretch'):
             _clear_form()
     st.divider()
 
@@ -580,15 +540,14 @@ def main():
             with open(rules_path, "rb") as f:
                 st.download_button("⬇️ Download Contest Rules (PDF)",
                     data=f, file_name="KY_Wheat_Contest_Rules.pdf",
-                    mime="application/pdf", width=True)
+                    mime="application/pdf", width='stretch')
         else:
             st.info(
                 "- Min. **1.5 acres** harvested\n"
                 "- Deadline: **July 31**\n"
                 "- Supervisor must witness harvest\n"
                 "- Submit grain sample to **Colette Laurent**, Princeton KY\n"
-                "- Official yield at **13.5% moisture**\n\n"
-                "_Place `2025WheatYieldContestRules.pdf` in app folder to enable PDF download._"
+                "- Official yield at **13.5% moisture**"
             )
         st.divider()
         cfg = _gdrive_secrets()
@@ -598,12 +557,10 @@ def main():
             st.warning("📊 Google Sheets: not configured")
 
     # ════════════════════════════════════════════════════
-    # SECTION 1 — PRODUCER INFO  (grouped clearly)
+    # SECTION 1 — PRODUCER & SUPERVISOR
     # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s1">👤 Section 1 — Producer & Supervisor Information</div>',
                 unsafe_allow_html=True)
-
-    # ── Producer block ───────────────────────────────────
     st.markdown('<div class="sub-label">🌿 Producer / Grower</div>', unsafe_allow_html=True)
     p1, p2, p3 = st.columns(3)
     with p1:
@@ -611,30 +568,25 @@ def main():
         st.text_input("Producer Full Name *", key="producer_name")
         st.text_input("Profession / Operation Type *", key="profession")
     with p2:
-        st.text_input("Producer Email *", key="producer_email",
-                      placeholder="grower@email.com")
-        st.text_input("Phone *", key="producer_phone",
-                      placeholder="270-555-1234")
+        st.text_input("Producer Email *", key="producer_email", placeholder="grower@email.com")
+        st.text_input("Phone *", key="producer_phone", placeholder="270-555-1234")
         st.text_input("Mobile", key="producer_mobile")
     with p3:
         st.text_input("Street Address", key="producer_address")
         st.text_input("Town / City", key="producer_town")
         st.text_input("Zip Code", key="producer_zip")
-
-    # ── Supervisor block ─────────────────────────────────
     st.markdown('<hr class="sub-divider"><div class="sub-label">🏛️ County Agent / Supervisor</div>',
                 unsafe_allow_html=True)
     s1, s2, s3 = st.columns(3)
     with s1:
         st.text_input("Supervisor Full Name *", key="supervisor_name")
     with s2:
-        st.text_input("Supervisor Phone *", key="supervisor_phone",
-                      placeholder="270-555-5678")
+        st.text_input("Supervisor Phone *", key="supervisor_phone", placeholder="270-555-5678")
     with s3:
         st.date_input("Supervisor Signature Date", key="supervisor_sig_date")
 
     # ════════════════════════════════════════════════════
-    # SECTION 2 — AGRONOMIC  (planting + harvest dates here)
+    # SECTION 2 — AGRONOMIC
     # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s2">🌱 Section 2 — Agronomic Data</div>',
                 unsafe_allow_html=True)
@@ -655,8 +607,7 @@ def main():
     # ════════════════════════════════════════════════════
     # SECTION 3 — FERTILIZER
     # ════════════════════════════════════════════════════
-    st.markdown('<div class="sec-hdr s3">🧪 Section 3 — Fertilizer</div>',
-                unsafe_allow_html=True)
+    st.markdown('<div class="sec-hdr s3">🧪 Section 3 — Fertilizer</div>', unsafe_allow_html=True)
     st.caption("Fall Fertilizer (lb/acre)")
     c1,c2,c3,c4 = st.columns(4)
     with c1: st.text_input("N (lb/A)", key="fall_n")
@@ -743,9 +694,9 @@ def main():
     with mc2:
         st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
         st.button("➕ Add Reading", disabled=(slots_left==0),
-                  width=True, on_click=_add_reading_cb)
+                  width='stretch', on_click=_add_reading_cb)
         if readings_now:
-            st.button("🗑️ Clear", width=True, on_click=_clear_readings_cb)
+            st.button("🗑️ Clear", width='stretch', on_click=_clear_readings_cb)
     with mc3:
         gm_avg = st.session_state["gm_avg"]
         if readings_now:
@@ -788,7 +739,9 @@ def main():
                     f'<br>= <b>{official_yield:.2f} bu/ac</b></div>', unsafe_allow_html=True)
 
     # ════════════════════════════════════════════════════
-    # SECTION 8 — NOTES + SCALE TICKET PHOTO
+    # SECTION 8 — NOTES + PHOTO
+    # FIX: photo bytes stored in session_state immediately on upload
+    #      so they survive the Streamlit rerun triggered by Submit
     # ════════════════════════════════════════════════════
     st.markdown('<div class="sec-hdr s8">📝 Section 8 — Notes & Scale Ticket Photo</div>',
                 unsafe_allow_html=True)
@@ -807,8 +760,7 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         st.text_area("Agent notes", height=130, key="agent_notes",
-                     placeholder="e.g. Field had minor flooding in NE corner. "
-                                 "Scale certified Oct 2025...",
+                     placeholder="e.g. Field had minor flooding in NE corner. Scale certified Oct 2025...",
                      label_visibility="collapsed")
     with col_photo:
         st.markdown("""
@@ -825,13 +777,28 @@ def main():
           </div>
         </div>
         """, unsafe_allow_html=True)
+
         scale_photo = st.file_uploader("Upload scale ticket photo",
                                        type=["jpg","jpeg","png","heic","webp"],
                                        label_visibility="collapsed")
-        if scale_photo:
-            st.image(scale_photo,
-                     caption=f"✅ {scale_photo.name}  ({scale_photo.size/1024:.0f} KB)",
-                     width=True)
+
+        # KEY FIX: save bytes to session_state immediately when file selected
+        # File uploader resets to None on every Streamlit rerun (e.g. on Submit click)
+        # Session state persists across reruns — bytes are safe here
+        if scale_photo is not None:
+            st.session_state["_photo_bytes"]    = scale_photo.read()
+            st.session_state["_photo_filename"] = scale_photo.name
+            st.session_state["_photo_size"]     = scale_photo.size
+
+        # Show preview from session state (works even after rerun)
+        if st.session_state.get("_photo_bytes"):
+            try:
+                st.image(st.session_state["_photo_bytes"],
+                         caption=f"✅ {st.session_state['_photo_filename']} "
+                                 f"({st.session_state.get('_photo_size',0)/1024:.0f} KB)",
+                         width='stretch')
+            except Exception:
+                st.info(f"✅ Photo ready: {st.session_state.get('_photo_filename','')}")
             st.success("Photo will be saved with this entry.")
         else:
             st.markdown("""
@@ -899,10 +866,10 @@ def main():
 
     submit_clicked = st.button("💾  Save Entry & Send to State Office",
                                disabled=not form_ready, type="primary",
-                               width=True)
+                               width='stretch')
 
-      # ════════════════════════════════════════════════════
-    # ON SUBMIT  — all variables defined in correct order
+    # ════════════════════════════════════════════════════
+    # ON SUBMIT
     # ════════════════════════════════════════════════════
     if submit_clicked and form_ready:
         r   = st.session_state.get("moisture_readings", [])
@@ -911,7 +878,6 @@ def main():
         gm3 = r[2] if len(r) > 2 else ""
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
-        # Build data dict — photo link is placeholder until entry_id exists
         data = {
             "County":                    st.session_state["county"],
             "Producer_Name":             st.session_state["producer_name"],
@@ -962,46 +928,41 @@ def main():
             "Grain_Weight_lbs":          st.session_state["grain_weight"],
             "Official_Yield_BuAcre":     st.session_state["official_yield"],
             "Agent_Notes":               st.session_state.get("agent_notes",""),
-            "Scale_Ticket_Photo":        "[no photo]",   # updated below after entry_id exists
+            "Scale_Ticket_Photo":        "[no photo]",  # updated after entry_id exists
             "_moisture_list":            r,
             "Submission_Date":           now_str,
         }
 
         try:
-            # STEP 1: Save Excel → entry_id is born here
+            # STEP 1: entry_id born here
             entry_id = build_excel_with_entry(data, EXCEL_FILE)
             area     = COUNTY_AREA.get(data["County"], 4)
 
-            # STEP 2: Upload photo NOW (entry_id exists)
-            if scale_photo:
+            # STEP 2: upload photo using SESSION STATE bytes (not scale_photo widget)
+            photo_bytes    = st.session_state.get("_photo_bytes")
+            photo_filename = st.session_state.get("_photo_filename", "photo.jpg")
+            if photo_bytes:
                 photo_link = upload_photo_to_gdrive(
-                    scale_photo.getvalue(), scale_photo.name,
+                    photo_bytes, photo_filename,
                     entry_id, st.session_state["county"]
                 )
                 data["Scale_Ticket_Photo"] = photo_link if photo_link else "[upload failed]"
+                if photo_link:
+                    # Clear photo from session after successful upload
+                    st.session_state["_photo_bytes"]    = None
+                    st.session_state["_photo_filename"] = None
+                    st.session_state["_photo_size"]     = 0
 
-                # Temp Start
-            if scale_photo:
-                photo_link = upload_photo_to_gdrive(
-                    scale_photo.getvalue(), scale_photo.name,
-                    entry_id, st.session_state["county"]
-                )
-                st.write(f"DEBUG photo_link = '{photo_link}'")          # ← add this
-                st.write(f"DEBUG _gd_error = '{st.session_state.get('_gd_error')}'")  # ← and this
-                data["Scale_Ticket_Photo"] = photo_link if photo_link else "[upload failed]"
-
-                # Temp finish
-
-            # STEP 3: Append to Google Sheet (has real photo link now)
+            # STEP 3: append to Google Sheet
             st.session_state["_gd_error"] = None
             sheet_ok = append_entry_to_sheet(data, entry_id)
 
-            # STEP 4: Send email
+            # STEP 4: send email
             subject  = (f"KY Wheat Contest Entry #{entry_id} — "
                         f"{data['County']} County — {data['Producer_Name']}")
             email_ok = send_formsubmit_email(data, entry_id, subject)
 
-            # STEP 5: Success banner
+            # STEP 5: success banner
             st.success(f"✅ Entry #{entry_id} submitted successfully!")
             st.markdown(
                 f"**Producer:** {data['Producer_Name']} &nbsp;|&nbsp; "
@@ -1012,10 +973,8 @@ def main():
                 f"**Grain Moisture:** {data['Grain_Moisture_Avg']:.1f}%"
             )
 
-            # STEP 6: Status pills
             col1, col2, col3 = st.columns(3)
-            with col1:
-                st.success("📊 Saved to Excel")
+            with col1: st.success("📊 Saved to Excel")
             with col2:
                 if sheet_ok:
                     st.success("☁️ Synced to Google Sheets")
@@ -1030,21 +989,18 @@ def main():
                 else:
                     st.warning("📧 Email failed")
 
-            # STEP 7: Download — inside try, entry_id guaranteed
             with open(EXCEL_FILE, "rb") as f:
                 st.download_button(
                     "⬇️ Download My Entry (Excel backup)", data=f,
                     file_name=f"entry_{entry_id}_{data['County']}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    help="Download a local backup. This does NOT send another email.")
+                    help="Does NOT send another email.")
 
-            # STEP 8: Track session
             st.session_state["session_entries"].append({
-                "Entry #":    entry_id,
-                "Producer":   data["Producer_Name"],
-                "County":     data["County"],
+                "Entry #": entry_id, "Producer": data["Producer_Name"],
+                "County": data["County"],
                 "Yield Bu/A": f"{data['Official_Yield_BuAcre']:.2f}",
-                "Time":       now_str,
+                "Time": now_str,
             })
             st.session_state["_agree_gen"] = st.session_state.get("_agree_gen", 0) + 1
 
@@ -1057,7 +1013,7 @@ def main():
         st.divider()
         st.subheader(f"📋 Your Submissions This Session ({len(session_entries)})")
         st.caption("Entries submitted during this browser session — securely saved to the state office.")
-        st.dataframe(pd.DataFrame(session_entries), width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(session_entries), width='stretch', hide_index=True)
 
     # ── Contact footer ───────────────────────────────────
     st.divider()
