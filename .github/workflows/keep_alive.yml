@@ -1,0 +1,20 @@
+name: Keep WheatVision Awake
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # every 6 hours
+  workflow_dispatch:          # allows manual trigger from Actions tab
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping WheatVision
+        run: |
+          curl -L --max-time 30 https://wheatvision.streamlit.app/ || true
+
+      - name: Ping Wheat Contest
+        run: |
+          curl -L --max-time 30 https://wheat-yield-contest.streamlit.app/ || true
+      - name: Ping Lime Calculator
+        run: |
+          curl -L --max-time 30 https://aglimecalc.streamlit.app// || true
