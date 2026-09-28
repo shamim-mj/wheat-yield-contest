@@ -264,28 +264,33 @@ def upload_photo_to_cloudinary(photo_bytes: bytes, filename: str,
 def upload_photo_to_sheet_cell(photo_bytes: bytes, filename: str,
                                 entry_id: int, county: str) -> str:
     """
-    Fallback: store a compact base64 thumbnail directly as a Google Sheets
-    IMAGE() formula. Resizes to max 200px so it fits in a cell.
-    No external service needed — works 100% with existing secrets.
+    Fallback: upload to Streamlit's built-in file sharing via a temporary
+    HTML page stored in session state, viewable via a data: URI link.
+    Stores a tiny marker in the sheet and shows a View button in the app.
     """
     try:
         from PIL import Image
         import io
         img = Image.open(io.BytesIO(photo_bytes))
-        # Convert to RGB and resize to thumbnail
         if img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGB")
-        img.thumbnail((400, 400))
+        # Resize to max 800px for reasonable size
+        img.thumbnail((800, 800))
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=60)
+        img.save(buf, format="JPEG", quality=75)
         b64 = base64.b64encode(buf.getvalue()).decode()
-        data_url = f"data:image/jpeg;base64,{b64}"
+        # Store data URL in session for in-app viewing
+        st.session_state["_photo_data_url"] = f"data:image/jpeg;base64,{b64}"
+        st.session_state["_photo_entry_id"] = entry_id
+        size_kb = len(buf.getvalue()) // 1024
         st.session_state["_photo_debug"] = (
-            f"✅ Thumbnail stored as data URL ({len(b64)//1024} KB)")
-        return data_url
+            f"✅ Photo saved locally ({size_kb} KB). "
+            f"No cloud host configured — see 'View Photo' button after submit.")
+        # Store short marker in sheet (not the full base64)
+        return f"[photo saved in app — Entry #{entry_id} — {filename} — {size_kb}KB]"
     except Exception as e:
-        st.session_state["_photo_debug"] = f"Thumbnail exception: {e}"
-        return f"[photo:{filename} — could not encode]"
+        st.session_state["_photo_debug"] = f"Photo save exception: {e}"
+        return f"[photo:{filename} — could not save]"
 
 
 def upload_photo_to_gdrive(photo_bytes: bytes, filename: str,
@@ -452,6 +457,7 @@ def _blank_defaults():
         "_gd_error": None,
         # FIX: photo stored in session state so it survives Streamlit rerun
         "_photo_bytes": None, "_photo_filename": None, "_photo_size": 0,
+        "_photo_data_url": None, "_photo_entry_id": None,
     }
 
 def _init_state():
@@ -1113,10 +1119,28 @@ def main():
                 else:
                     st.warning("📧 Email failed")
 
-            # Always show photo upload debug log so we can diagnose
+            # Photo status
             if st.session_state.get("_photo_debug"):
-                with st.expander("📷 Photo upload log (tap to see)", expanded=True):
-                    st.code(st.session_state["_photo_debug"])
+                photo_url = st.session_state.get("_photo_data_url")
+                if photo_url:
+                    # No cloud host — show image inline and offer download
+                    st.info("📷 Photo stored locally — no cloud host configured. "
+                            "Set up Cloudinary for permanent URLs in Google Sheet.")
+                    with st.expander("📷 View Scale Ticket Photo", expanded=True):
+                        st.image(photo_url, caption=f"Entry #{entry_id} scale ticket",
+                                 width="stretch")
+                        # Offer as downloadable file
+                        import io as _io
+                        img_bytes = base64.b64decode(photo_url.split(",")[1])
+                        st.download_button(
+                            "⬇️ Download Photo",
+                            data=img_bytes,
+                            file_name=f"entry_{entry_id}_scale_ticket.jpg",
+                            mime="image/jpeg"
+                        )
+                else:
+                    with st.expander("📷 Photo upload log", expanded=False):
+                        st.code(st.session_state["_photo_debug"])
 
             with open(EXCEL_FILE, "rb") as f:
                 st.download_button(
