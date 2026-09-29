@@ -139,8 +139,7 @@ jobs:
               service=Service(ChromeDriverManager().install()), options=opts)
 
           for url in [
-              "https://wheatvision.streamlit.app/",
-              "https://wheatcontest.streamlit.app/",
+              "https://wheatcontest.streamlit.app/"
               
           ]:
               print(f"\nChecking {url} ...")
