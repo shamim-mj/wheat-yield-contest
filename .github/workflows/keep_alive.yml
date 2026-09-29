@@ -1,0 +1,64 @@
+name: Keep App Awake
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # every 6 hours
+  workflow_dispatch:          # allow manual trigger
+
+jobs:
+  wake:
+    runs-on: ubuntu-24.04     # pin to 24.04 to avoid Ubuntu 26 migration surprise
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5    # v5 uses Node.js 24 ✅
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install selenium webdriver-manager
+
+      - name: Wake WheatVision app
+        run: |
+          python - <<'EOF'
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.chrome.service import Service
+          from selenium.webdriver.common.by import By
+          from selenium.webdriver.support.ui import WebDriverWait
+          from selenium.webdriver.support import expected_conditions as EC
+          from webdriver_manager.chrome import ChromeDriverManager
+          import time
+
+          opts = Options()
+          opts.add_argument("--headless")
+          opts.add_argument("--no-sandbox")
+          opts.add_argument("--disable-dev-shm-usage")
+          opts.add_argument("--window-size=1920,1080")
+
+          driver = webdriver.Chrome(
+              service=Service(ChromeDriverManager().install()), options=opts)
+
+          for url in [
+              "https://wheatvision.streamlit.app/",
+              "https://wheatcontest.streamlit.app/",
+              
+          ]:
+              print(f"\nChecking {url} ...")
+              driver.get(url)
+              time.sleep(5)
+              try:
+                  wake_btn = WebDriverWait(driver, 10).until(
+                      EC.element_to_be_clickable((By.XPATH,
+                          "//button[contains(text(),'Yes, get this app back up')]"))
+                  )
+                  wake_btn.click()
+                  print("  → Clicked wake button, waiting for cold start...")
+                  time.sleep(45)
+              except Exception:
+                  print("  → App already awake")
+                  time.sleep(5)
+              print(f"  → Title: {driver.title}")
+
+          driver.quit()
+          print("\nAll done!")
+          EOF
