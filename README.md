@@ -3,7 +3,7 @@
 **University of Kentucky Cooperative Extension**  
 Built with Streamlit · Google Sheets · Cloudinary · FormSubmit
 
-🔗 **Live App:** https://wheat-yield-contest.streamlit.app
+🔗 **Live App:** https://wheatcontest.streamlit.app
 
 ---
 
